@@ -6,9 +6,9 @@ import (
 	"strconv"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
+	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
 	xerrors "gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
+	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
@@ -660,12 +660,22 @@ func (ma *Actor) SubmitPoSt(ctx exec.VMContext, proof []byte) (uint8, error) {
 		postProof := proofs.PoStProof{}
 		copy(postProof[:], proof)
 
-		// TODO: use IsPoStValidWithProver when proofs are implemented
+		// See comment above, in CommitSector.
+		//
+		// It is undefined behavior for a miner in "Live" mode to verify a proof
+		// created by a miner in "ProofsTest" mode (and vice-versa).
+		//
+		sectorStoreType := proofs.Live
+		if os.Getenv("FIL_USE_SMALL_SECTORS") == "true" {
+			sectorStoreType = proofs.Test
+		}
+
 		req := proofs.VerifyPoSTRequest{
 			ChallengeSeed: proofs.PoStChallengeSeed{},
 			CommRs:        commRs,
 			Faults:        []uint64{},
 			Proof:         postProof,
+			StoreType:     sectorStoreType,
 		}
 
 		res, err := (&proofs.RustVerifier{}).VerifyPoST(req)

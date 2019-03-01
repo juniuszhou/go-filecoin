@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
+	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 
 	"gx/ipfs/QmekxXDhCxCJRNuzmHreuaT3BsuJcsjcXWNrtV9C8DRHtd/go-multibase"
 
@@ -68,7 +68,7 @@ func TestPaymentChannelLs(t *testing.T) {
 	t.Run("Works with default payer", func(t *testing.T) {
 		t.Parallel()
 
-		payer, err := address.NewFromString(fixtures.TestAddresses[0])
+		payer, err := address.NewFromString(fixtures.TestAddresses[2])
 		require.NoError(err)
 		target, err := address.NewFromString(fixtures.TestAddresses[1])
 		require.NoError(err)
@@ -86,7 +86,7 @@ func TestPaymentChannelLs(t *testing.T) {
 	t.Run("Works with specified payer", func(t *testing.T) {
 		t.Parallel()
 
-		payer, err := address.NewFromString(fixtures.TestAddresses[0])
+		payer, err := address.NewFromString(fixtures.TestAddresses[2])
 		require.NoError(err)
 		target, err := address.NewFromString(fixtures.TestAddresses[1])
 		require.NoError(err)
@@ -108,7 +108,7 @@ func TestPaymentChannelLs(t *testing.T) {
 	t.Run("Notifies when channels not found", func(t *testing.T) {
 		t.Parallel()
 
-		payer, err := address.NewFromString(fixtures.TestAddresses[0])
+		payer, err := address.NewFromString(fixtures.TestAddresses[2])
 		require.NoError(err)
 		target, err := address.NewFromString(fixtures.TestAddresses[1])
 		require.NoError(err)
@@ -128,7 +128,7 @@ func TestPaymentChannelVoucherSuccess(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 
-	payer, err := address.NewFromString(fixtures.TestAddresses[0])
+	payer, err := address.NewFromString(fixtures.TestAddresses[2])
 	require.NoError(err)
 	target, err := address.NewFromString(fixtures.TestAddresses[1])
 	require.NoError(err)
@@ -149,7 +149,7 @@ func TestPaymentChannelRedeemSuccess(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 
-	payer, err := address.NewFromString(fixtures.TestAddresses[0])
+	payer, err := address.NewFromString(fixtures.TestAddresses[2])
 	require.NoError(err)
 	target, err := address.NewFromString(fixtures.TestAddresses[1])
 	require.NoError(err)
@@ -182,7 +182,7 @@ func TestPaymentChannelRedeemTooEarlyFails(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 
-	payer, err := address.NewFromString(fixtures.TestAddresses[0])
+	payer, err := address.NewFromString(fixtures.TestAddresses[2])
 	require.NoError(err)
 	target, err := address.NewFromString(fixtures.TestAddresses[1])
 	require.NoError(err)
@@ -217,7 +217,7 @@ func TestPaymentChannelReclaimSuccess(t *testing.T) {
 	require := require.New(t)
 
 	// Initial Balance 10,000
-	payer, err := address.NewFromString(fixtures.TestAddresses[0])
+	payer, err := address.NewFromString(fixtures.TestAddresses[2])
 	require.NoError(err)
 	// Initial Balance 50,000
 	target, err := address.NewFromString(fixtures.TestAddresses[1])
@@ -266,7 +266,7 @@ func TestPaymentChannelCloseSuccess(t *testing.T) {
 	require := require.New(t)
 
 	// Initial Balance 10,000,000
-	payerA, err := address.NewFromString(fixtures.TestAddresses[0])
+	payerA, err := address.NewFromString(fixtures.TestAddresses[2])
 	require.NoError(err)
 
 	// Initial Balance 10,000,000
@@ -312,7 +312,7 @@ func TestPaymentChannelExtendSuccess(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 
-	payer, err := address.NewFromString(fixtures.TestAddresses[0])
+	payer, err := address.NewFromString(fixtures.TestAddresses[2])
 	require.NoError(err)
 	target, err := address.NewFromString(fixtures.TestAddresses[1])
 	require.NoError(err)
@@ -342,7 +342,7 @@ func daemonTestWithPaymentChannel(t *testing.T, payerAddress *address.Address, t
 	d := th.NewDaemon(
 		t,
 		th.WithMiner(fixtures.TestMiners[0]),
-		th.KeyFile(fixtures.KeyFilePaths()[0]),
+		th.KeyFile(fixtures.KeyFilePaths()[2]),
 	).Start()
 	defer d.ShutdownSuccess()
 

@@ -7,8 +7,8 @@ import (
 	"sort"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	node "gx/ipfs/QmcKKBwfz6FyQdHR2jsXrrF6XeSBXYL86anmWNewpFpoF5/go-ipld-format"
+	node "gx/ipfs/QmRL22E4paat7ky7vx9MLpR97JHHbFPrg3ytFQw6qp1y1s/go-ipld-format"
+	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/proofs"
@@ -54,13 +54,47 @@ type Block struct {
 	// Proof is a proof of spacetime generated using the hash of the previous ticket as
 	// a challenge
 	Proof proofs.PoStProof `json:"proof"`
+
+	cachedCid cid.Cid
+
+	cachedBytes []byte
 }
+
+// set this to true to panic if the blocks data differs from the cached cid. This should
+// be obviated by changing the block to have protected construction, private fields, and
+// getters for all the values.
+var paranoid = false
 
 // Cid returns the content id of this block.
 func (b *Block) Cid() cid.Cid {
-	// TODO: Cache ToNode() and/or ToNode().Cid(). We should be able to do this efficiently using
-	// DeepEquals(), or perhaps our own Equals() interface.
-	return b.ToNode().Cid()
+	if b.cachedCid == cid.Undef {
+		if b.cachedBytes == nil {
+			bytes, err := cbor.DumpObject(b)
+			if err != nil {
+				panic(err)
+			}
+			b.cachedBytes = bytes
+		}
+		c, err := cid.Prefix{
+			Version:  1,
+			Codec:    cid.DagCBOR,
+			MhType:   DefaultHashFunction,
+			MhLength: -1,
+		}.Sum(b.cachedBytes)
+		if err != nil {
+			panic(err)
+		}
+
+		b.cachedCid = c
+	}
+
+	if paranoid {
+		if b.cachedCid != b.ToNode().Cid() {
+			panic("somewhere, a programmer was very bad")
+		}
+	}
+
+	return b.cachedCid
 }
 
 // IsParentOf returns true if the argument is a parent of the receiver.
@@ -95,6 +129,8 @@ func DecodeBlock(b []byte) (*Block, error) {
 	if err := cbor.DecodeInto(b, &out); err != nil {
 		return nil, err
 	}
+
+	out.cachedBytes = b
 
 	return &out, nil
 }

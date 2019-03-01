@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
+	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/address"
@@ -333,7 +333,7 @@ func TestMinerCreateChargesGas(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 
-	miningMinerAddr, err := address.NewFromString(fixtures.TestMiners[0])
+	miningMinerOwnerAddr, err := address.NewFromString(fixtures.TestAddresses[0])
 	require.NoError(err)
 
 	d1 := th.NewDaemon(t, th.WithMiner(fixtures.TestMiners[0]), th.KeyFile(fixtures.KeyFilePaths()[2])).Start()
@@ -343,8 +343,8 @@ func TestMinerCreateChargesGas(t *testing.T) {
 	d1.ConnectSuccess(d)
 	var wg sync.WaitGroup
 
-	// make sure the FIL shows up in the MinerAccount
-	startingBalance := queryBalance(t, d, miningMinerAddr)
+	// make sure the FIL shows up in the MinerOwnerAccount
+	startingBalance := queryBalance(t, d, miningMinerOwnerAddr)
 
 	wg.Add(1)
 	go func() {
@@ -362,7 +362,7 @@ func TestMinerCreateChargesGas(t *testing.T) {
 	expectedPrice := types.NewAttoFILFromFIL(333)
 	expectedGasCost := big.NewInt(100)
 	expectedBalance := expectedBlockReward.Add(expectedPrice.MulBigInt(expectedGasCost))
-	newBalance := queryBalance(t, d, miningMinerAddr)
+	newBalance := queryBalance(t, d, miningMinerOwnerAddr)
 	assert.Equal(expectedBalance.String(), newBalance.Sub(startingBalance).String())
 }
 

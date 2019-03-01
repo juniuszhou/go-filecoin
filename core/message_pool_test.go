@@ -6,10 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	hamt "gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -33,12 +32,23 @@ func TestMessagePoolAddRemove(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Len(pool.Pending(), 0)
+	m, ok := pool.Get(c1)
+	assert.Nil(m)
+	assert.False(ok)
+
 	_, err = pool.Add(msg1)
 	assert.NoError(err)
 	assert.Len(pool.Pending(), 1)
 	_, err = pool.Add(msg2)
 	assert.NoError(err)
 	assert.Len(pool.Pending(), 2)
+
+	m, ok = pool.Get(c1)
+	assert.Equal(msg1, m)
+	assert.True(ok)
+	m, ok = pool.Get(c2)
+	assert.Equal(msg2, m)
+	assert.True(ok)
 
 	pool.Remove(c1)
 	assert.Len(pool.Pending(), 1)
@@ -56,6 +66,11 @@ func TestMessagePoolAddBadSignature(t *testing.T) {
 	c, err := pool.Add(smsg)
 	assert.False(c.Defined())
 	assert.Error(err)
+
+	c, _ = smsg.Cid()
+	m, ok := pool.Get(c)
+	assert.Nil(m)
+	assert.False(ok)
 }
 
 func TestMessagePoolDedup(t *testing.T) {
@@ -397,61 +412,6 @@ func TestUpdateMessagePool(t *testing.T) {
 
 		UpdateMessagePool(ctx, p, store, oldTipSet, newTipSet)
 		assertPoolEquals(assert, p)
-	})
-}
-
-func TestOrderMessagesByNonce(t *testing.T) {
-	t.Run("Empty pool", func(t *testing.T) {
-		assert := assert.New(t)
-		p := NewMessagePool()
-		ordered := OrderMessagesByNonce(p.Pending())
-		assert.Equal(0, len(ordered))
-	})
-
-	t.Run("Msgs in three orders", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		p := NewMessagePool()
-
-		m := types.NewMsgsWithAddrs(9, mockSigner.Addresses)
-
-		// Three in increasing nonce order.
-		m[3].From = m[0].From
-		m[6].From = m[0].From
-		m[0].Nonce = 0
-		m[3].Nonce = 1
-		m[6].Nonce = 20
-
-		// Three in decreasing nonce order.
-		m[4].From = m[1].From
-		m[7].From = m[1].From
-		m[1].Nonce = 15
-		m[4].Nonce = 1
-		m[7].Nonce = 0
-
-		// Three out of order.
-		m[5].From = m[2].From
-		m[8].From = m[2].From
-		m[2].Nonce = 5
-		m[5].Nonce = 7
-		m[8].Nonce = 0
-
-		sm, err := types.SignMsgs(mockSigner, m)
-		require.NoError(err)
-
-		MustAdd(p, sm...)
-
-		ordered := OrderMessagesByNonce(p.Pending())
-		assert.Equal(len(p.Pending()), len(ordered))
-
-		lastSeen := make(map[address.Address]uint64)
-		for _, m := range ordered {
-			last, seen := lastSeen[m.From]
-			if seen {
-				assert.True(last <= uint64(m.Nonce))
-			}
-			lastSeen[m.From] = uint64(m.Nonce)
-		}
 	})
 }
 

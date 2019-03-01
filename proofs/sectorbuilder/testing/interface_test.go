@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/proofs/sectorbuilder"
 
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
 // MaxTimeToSealASector represents the maximum amount of time the test should
@@ -25,6 +26,9 @@ import (
 const MaxTimeToSealASector = time.Second * 360
 
 func TestSectorBuilder(t *testing.T) {
+	if os.Getenv("FILECOIN_RUN_SECTOR_BUILDER_TESTS") != "true" {
+		t.SkipNow()
+	}
 	t.Run("concurrent AddPiece and SealAllStagedSectors", func(t *testing.T) {
 		h := NewBuilder(t).Build()
 		defer h.Close()
@@ -308,21 +312,28 @@ func TestSectorBuilder(t *testing.T) {
 
 			// generate a proof-of-spacetime
 			gres, gerr := h.SectorBuilder.GeneratePoST(sectorbuilder.GeneratePoSTRequest{
-				CommRs:        []proofs.CommR{val.SealingResult.CommR, val.SealingResult.CommR},
+				CommRs:        []proofs.CommR{val.SealingResult.CommR},
 				ChallengeSeed: challengeSeed,
 			})
 			require.NoError(t, gerr)
 
-			// TODO: Replace these hard-coded values (in rust-proofs) with an
+			// TODO: Replace these hard-coded values (in rust-fil-proofs) with an
 			// end-to-end PoST test over a small number of replica commitments
 			require.Equal(t, "00101010", fmt.Sprintf("%08b", gres.Proof[0]))
 			require.Equal(t, 1, len(gres.Faults))
 			require.Equal(t, uint64(0), gres.Faults[0])
 
 			// verify the proof-of-spacetime
-			vres, verr := proofs.IsPoStValidWithVerifier(&proofs.RustVerifier{}, []proofs.CommR{val.SealingResult.CommR}, challengeSeed, gres.Faults, gres.Proof)
+			vres, verr := (&proofs.RustVerifier{}).VerifyPoST(proofs.VerifyPoSTRequest{
+				ChallengeSeed: proofs.PoStChallengeSeed{},
+				CommRs:        []proofs.CommR{val.SealingResult.CommR},
+				Faults:        gres.Faults,
+				Proof:         gres.Proof,
+				StoreType:     proofs.Test,
+			})
+
 			require.NoError(t, verr)
-			require.True(t, vres)
+			require.True(t, vres.IsValid)
 		case <-timeout:
 			t.Fatalf("timed out waiting for seal to complete")
 		}

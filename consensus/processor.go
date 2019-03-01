@@ -14,20 +14,13 @@ import (
 	"github.com/filecoin-project/go-filecoin/vm/errors"
 )
 
-// SignedMessageValidator validates incoming signed messages.
-// This also includes other validations limited to the scope of the message and its fromActor
-type SignedMessageValidator interface {
-	// Validate validates that the given message is ready to be processed.
-	Validate(ctx context.Context, msg *types.SignedMessage, fromActor *actor.Actor) error
-}
-
-// BlockRewarder applies all rewards due to the miner for processing a block including block reward and gas
+// BlockRewarder applies all rewards due to the miner's owner for processing a block including block reward and gas
 type BlockRewarder interface {
 	// BlockReward pays out the mining reward
-	BlockReward(ctx context.Context, st state.Tree, minerAddr address.Address) error
+	BlockReward(ctx context.Context, st state.Tree, minerOwnerAddr address.Address) error
 
 	// GasReward pays gas from the sender to the miner
-	GasReward(ctx context.Context, st state.Tree, minerAddr address.Address, msg *types.SignedMessage, cost *types.AttoFIL) error
+	GasReward(ctx context.Context, st state.Tree, minerOwnerAddr address.Address, msg *types.SignedMessage, cost *types.AttoFIL) error
 }
 
 // ApplicationResult contains the result of successfully applying one message.
@@ -107,8 +100,14 @@ func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms 
 		log.Infof("[TIMER] DefaultProcessor.ProcessBlock BlkCID: %s - elapsed time: %s", blk.Cid(), time.Since(processBlkTimer).Round(time.Millisecond))
 	}()
 
+	// find miner's owner address
+	minerOwnerAddr, err := minerOwnerAddress(ctx, st, vms, blk.Miner)
+	if err != nil {
+		return nil, err
+	}
+
 	bh := types.NewBlockHeight(uint64(blk.Height))
-	res, faultErr := p.ApplyMessagesAndPayRewards(ctx, st, vms, blk.Messages, blk.Miner, bh, ancestors)
+	res, faultErr := p.ApplyMessagesAndPayRewards(ctx, st, vms, blk.Messages, minerOwnerAddr, bh, ancestors)
 	if faultErr != nil {
 		return emptyResults, faultErr
 	}
@@ -147,6 +146,12 @@ func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms
 	// transition of the first validated block (change would reach here and
 	// consensus functions).
 	for _, blk := range tips {
+		// find miner's owner address
+		minerOwnerAddr, err := minerOwnerAddress(ctx, st, vms, blk.Miner)
+		if err != nil {
+			return &emptyRes, err
+		}
+
 		// filter out duplicates within TipSet
 		var msgs []*types.SignedMessage
 		for _, msg := range blk.Messages {
@@ -162,7 +167,7 @@ func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms
 			// TODO is there ever a reason to try a duplicate failed message again within the same tipset?
 			msgFilter[mCid.String()] = struct{}{}
 		}
-		amRes, err := p.ApplyMessagesAndPayRewards(ctx, st, vms, msgs, blk.Miner, bh, ancestors)
+		amRes, err := p.ApplyMessagesAndPayRewards(ctx, st, vms, msgs, minerOwnerAddr, bh, ancestors)
 		if err != nil {
 			return &emptyRes, err
 		}
@@ -254,7 +259,7 @@ func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms
 //       revert errors.
 //   - everything else: successfully applied (include, keep changes)
 //
-func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms vm.StorageMap, msg *types.SignedMessage, minerAddr address.Address, bh *types.BlockHeight, gasTracker *vm.GasTracker, ancestors []types.TipSet) (*ApplicationResult, error) {
+func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms vm.StorageMap, msg *types.SignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight, gasTracker *vm.GasTracker, ancestors []types.TipSet) (*ApplicationResult, error) {
 
 	// used for log timer call below
 	msgCid, err := msg.Cid()
@@ -282,9 +287,9 @@ func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms 
 	}
 
 	if r.GasAttoFIL.IsPositive() {
-		gasError := p.blockRewarder.GasReward(ctx, st, minerAddr, msg, r.GasAttoFIL)
+		gasError := p.blockRewarder.GasReward(ctx, st, minerOwnerAddr, msg, r.GasAttoFIL)
 		if gasError != nil {
-			return nil, errors.NewFaultError("failed to transfer gas reward to miner")
+			return nil, errors.NewFaultError("failed to transfer gas reward to owner of miner")
 		}
 	}
 
@@ -486,11 +491,7 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 		GasAttoFIL: gasCharge,
 	}
 
-	// :( - necessary because go slices aren't covariant and we need to convert
-	// from [][]byte to []Bytes.
-	for _, b := range ret {
-		receipt.Return = append(receipt.Return, b)
-	}
+	receipt.Return = append(receipt.Return, ret...)
 
 	return receipt, vmErr
 }
@@ -508,18 +509,18 @@ type ApplyMessagesResponse struct {
 	TemporaryErrors []error
 }
 
-// ApplyMessagesAndPayRewards begins by paying the block mining reward to the miner. It then applies messages to a state tree.
+// ApplyMessagesAndPayRewards begins by paying the block mining reward to the miner's owner. It then applies messages to a state tree.
 // It returns an ApplyMessagesResponse which wraps the results of message application,
 // groupings of messages with permanent failures, temporary failures, and
 // successes, and the permanent and temporary errors raised during application.
 // ApplyMessages will return an error iff a fault message occurs.
 // Precondition: signatures of messages are checked by the caller.
-func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm.StorageMap, messages []*types.SignedMessage, minerAddr address.Address, bh *types.BlockHeight, ancestors []types.TipSet) (ApplyMessagesResponse, error) {
+func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm.StorageMap, messages []*types.SignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight, ancestors []types.TipSet) (ApplyMessagesResponse, error) {
 	var emptyRet ApplyMessagesResponse
 	var ret ApplyMessagesResponse
 
-	// transfer block reward to miner from network address.
-	if err := p.blockRewarder.BlockReward(ctx, st, minerAddr); err != nil {
+	// transfer block reward to miner's owner from network address.
+	if err := p.blockRewarder.BlockReward(ctx, st, minerOwnerAddr); err != nil {
 		return ApplyMessagesResponse{}, err
 	}
 
@@ -527,7 +528,7 @@ func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st st
 
 	// process all messages
 	for _, smsg := range messages {
-		r, err := p.ApplyMessage(ctx, st, vms, smsg, minerAddr, bh, gasTracker, ancestors)
+		r, err := p.ApplyMessage(ctx, st, vms, smsg, minerOwnerAddr, bh, gasTracker, ancestors)
 		// If the message should not have been in the block, bail somehow.
 		switch {
 		case errors.IsFault(err):
@@ -548,51 +549,7 @@ func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st st
 	return ret, nil
 }
 
-// DefaultMessageValidator validates that a message coming in from the network is valid.
-type DefaultMessageValidator struct{}
-
-// NewDefaultMessageValidator creates a new DefaultMessageValidator.
-func NewDefaultMessageValidator() *DefaultMessageValidator {
-	return &DefaultMessageValidator{}
-}
-
-var _ SignedMessageValidator = (*DefaultMessageValidator)(nil)
-
-// Validate validates that the given message is ready to be processed.
-func (nmv *DefaultMessageValidator) Validate(ctx context.Context, msg *types.SignedMessage, fromActor *actor.Actor) error {
-	if !msg.VerifySignature() {
-		return errInvalidSignature
-	}
-
-	if msg.From == msg.To {
-		return errSelfSend
-	}
-
-	// sender must be an account actor.
-	if !fromActor.Code.Equals(types.AccountActorCodeCid) {
-		return errNonAccountActor
-	}
-
-	// avoid processing messages for actors that cannot pay.
-	if !canCoverGasLimit(msg, fromActor) {
-		log.Info("Insufficient funds to cover gas limit: ", fromActor, msg)
-		return errInsufficientGas
-	}
-
-	if msg.Nonce < fromActor.Nonce {
-		log.Info("Nonce too low: ", msg.Nonce, fromActor.Nonce, fromActor, msg)
-		return errNonceTooLow
-	}
-
-	if msg.Nonce > fromActor.Nonce {
-		log.Info("Nonce too high: ", msg.Nonce, fromActor.Nonce, fromActor, msg)
-		return errNonceTooHigh
-	}
-
-	return nil
-}
-
-// DefaultBlockRewarder pays the block reward from the network actor to the miner.
+// DefaultBlockRewarder pays the block reward from the network actor to the miner's owner.
 type DefaultBlockRewarder struct{}
 
 // NewDefaultBlockRewarder creates a new rewarder that actually pays the appropriate rewards.
@@ -602,19 +559,19 @@ func NewDefaultBlockRewarder() *DefaultBlockRewarder {
 
 var _ BlockRewarder = (*DefaultBlockRewarder)(nil)
 
-// BlockReward transfers the block reward from the network actor to the miner.
-func (br *DefaultBlockRewarder) BlockReward(ctx context.Context, st state.Tree, minerAddr address.Address) error {
+// BlockReward transfers the block reward from the network actor to the miner's owner.
+func (br *DefaultBlockRewarder) BlockReward(ctx context.Context, st state.Tree, minerOwnerAddr address.Address) error {
 	cachedTree := state.NewCachedStateTree(st)
-	if err := rewardTransfer(ctx, address.NetworkAddress, minerAddr, br.BlockRewardAmount(), cachedTree); err != nil {
+	if err := rewardTransfer(ctx, address.NetworkAddress, minerOwnerAddr, br.BlockRewardAmount(), cachedTree); err != nil {
 		return errors.FaultErrorWrap(err, "Error attempting to pay block reward")
 	}
 	return cachedTree.Commit(ctx)
 }
 
-// GasReward transfers the gas cost reward from the sender actor to the miner
-func (br *DefaultBlockRewarder) GasReward(ctx context.Context, st state.Tree, minerAddr address.Address, msg *types.SignedMessage, gas *types.AttoFIL) error {
+// GasReward transfers the gas cost reward from the sender actor to the minerOwnerAddr
+func (br *DefaultBlockRewarder) GasReward(ctx context.Context, st state.Tree, minerOwnerAddr address.Address, msg *types.SignedMessage, gas *types.AttoFIL) error {
 	cachedTree := state.NewCachedStateTree(st)
-	if err := rewardTransfer(ctx, msg.From, minerAddr, gas, cachedTree); err != nil {
+	if err := rewardTransfer(ctx, msg.From, minerOwnerAddr, gas, cachedTree); err != nil {
 		return errors.FaultErrorWrap(err, "Error attempting to pay gas reward")
 	}
 	return cachedTree.Commit(ctx)
@@ -644,12 +601,6 @@ func rewardTransfer(ctx context.Context, fromAddr, toAddr address.Address, value
 	return vm.Transfer(fromActor, toActor, value)
 }
 
-// returns true if the maximum gas charge does not exceed the actor's balance after message value has been subtracted.
-func canCoverGasLimit(msg *types.SignedMessage, actor *actor.Actor) bool {
-	maximumGasCharge := msg.GasPrice.MulBigInt(big.NewInt(int64(msg.GasLimit)))
-	return maximumGasCharge.LessEqual(actor.Balance.Sub(msg.Value))
-}
-
 func blockGasLimitError(gasTracker *vm.GasTracker) error {
 	if gasTracker.GasAboveBlockLimit() {
 		return errGasAboveBlockLimit
@@ -673,4 +624,20 @@ func isPermanentError(err error) bool {
 		err == errNonAccountActor ||
 		err == errors.Errors[errors.ErrCannotTransferNegativeValue] ||
 		err == errGasAboveBlockLimit
+}
+
+// minerOwnerAddress finds the address of the owner of the given miner
+func minerOwnerAddress(ctx context.Context, st state.Tree, vms vm.StorageMap, minerAddr address.Address) (address.Address, error) {
+	ret, code, err := CallQueryMethod(ctx, st, vms, minerAddr, "getOwner", []byte{}, address.Address{}, types.NewBlockHeight(0))
+	if err != nil {
+		return address.Address{}, errors.FaultErrorWrap(err, "could not get miner owner")
+	}
+	if code != 0 {
+		return address.Address{}, errors.NewFaultErrorf("could not get miner owner. error code %d", code)
+	}
+	minerOwnerAddr, err := address.NewFromBytes(ret[0])
+	if err != nil {
+		return address.Address{}, errors.FaultErrorWrap(err, "miner owner return value could not be decoded as address")
+	}
+	return minerOwnerAddr, nil
 }

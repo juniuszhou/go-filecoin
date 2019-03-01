@@ -5,7 +5,7 @@ import (
 	"unsafe"
 
 	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
 )
 
 // #cgo LDFLAGS: -L${SRCDIR}/lib -lfilecoin_proofs
@@ -100,15 +100,20 @@ func (rp *RustVerifier) VerifyPoST(req VerifyPoSTRequest) (VerifyPoSTResponse, e
 	faultsPtr, faultsSize := cUint64s(req.Faults)
 	defer C.free(unsafe.Pointer(faultsPtr))
 
+	cfg, err := CSectorStoreType(req.StoreType)
+	if err != nil {
+		return VerifyPoSTResponse{}, err
+	}
+
 	// a mutable pointer to a VerifyPoSTResponse C-struct
 	resPtr := (*C.VerifyPoSTResponse)(unsafe.Pointer(C.verify_post(
+		cfg,
 		(*C.uint8_t)(flattenedCommRsCBytes),
 		C.size_t(len(flattened)),
 		(*[32]C.uint8_t)(challengeSeedCBytes),
 		(*[192]C.uint8_t)(proofCBytes),
 		faultsPtr,
 		faultsSize,
-		0,
 	)))
 	defer C.destroy_verify_post_response(resPtr)
 

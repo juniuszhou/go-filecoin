@@ -6,12 +6,13 @@ import (
 	//	"math/rand"
 	"testing"
 
+	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
+	"gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
+	"gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
 
 	"github.com/filecoin-project/go-filecoin/abi"
+	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
@@ -19,13 +20,18 @@ import (
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
 
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
-// MustGetNonce returns the next nonce for an actor at the given address or panics.
+// MustGetNonce returns the next nonce for an actor at an address or panics.
 func MustGetNonce(st state.Tree, a address.Address) uint64 {
-	mp := NewMessagePool()
-	nonce, err := NextNonce(context.Background(), st, mp, a)
+	ctx := context.Background()
+	actr, err := st.GetActor(ctx, a)
+	if err != nil {
+		panic(err)
+	}
+
+	nonce, err := actor.NextNonce(actr)
 	if err != nil {
 		panic(err)
 	}
@@ -83,7 +89,7 @@ func NewChainWithMessages(store *hamt.CborIpldStore, root types.TipSet, msgSets 
 				Parents: parents.ToSortedCidSet(),
 			}
 			MustPut(store, child)
-			ts[child.Cid().String()] = child
+			ts[child.Cid()] = child
 		}
 		for _, msgs := range tsMsgs {
 			child := &types.Block{
@@ -92,7 +98,7 @@ func NewChainWithMessages(store *hamt.CborIpldStore, root types.TipSet, msgSets 
 				Height:   types.Uint64(height + 1),
 			}
 			MustPut(store, child)
-			ts[child.Cid().String()] = child
+			ts[child.Cid()] = child
 		}
 		tipSets = append(tipSets, ts)
 		parents = ts

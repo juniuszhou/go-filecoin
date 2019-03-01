@@ -10,7 +10,6 @@ import (
 
 	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
 
-	"github.com/filecoin-project/go-filecoin/core"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
@@ -54,13 +53,12 @@ func (w *DefaultWorker) Generate(ctx context.Context,
 		return nil, errors.Wrap(err, "get base tip set ancestors")
 	}
 
-	pending := w.messagePool.Pending()
-	messages := make([]*types.SignedMessage, len(pending))
-
-	copy(messages, core.OrderMessagesByNonce(pending))
+	pending := w.messageSource.Pending()
+	mq := NewMessageQueue(pending)
+	messages := mq.Drain()
 
 	vms := vm.NewStorageMap(w.blockstore)
-	res, err := w.processor.ApplyMessagesAndPayRewards(ctx, stateTree, vms, messages, w.minerAddr, types.NewBlockHeight(blockHeight), ancestors)
+	res, err := w.processor.ApplyMessagesAndPayRewards(ctx, stateTree, vms, messages, w.minerOwnerAddr, types.NewBlockHeight(blockHeight), ancestors)
 	if err != nil {
 		return nil, errors.Wrap(err, "generate apply messages")
 	}
@@ -91,15 +89,17 @@ func (w *DefaultWorker) Generate(ctx context.Context,
 		Ticket:          ticket,
 	}
 
-	// TODO: Should we really be pruning the message pool here at all? Maybe this should happen elsewhere.
 	for i, msg := range res.PermanentFailures {
 		// We will not be able to apply this message in the future because the error was permanent.
 		// Therefore, we will remove it from the MessagePool now.
+		// There might be better places to do this, such as wherever successful messages are removed
+		// from the pool, or by posting the failure to an event bus to be handled async.
 		log.Infof("permanent ApplyMessage failure, [%s] (%s)", msg, res.PermanentErrors[i])
-		// Intentionally not handling error case, since it just means we won't be able to remove from pool.
 		mc, err := msg.Cid()
 		if err == nil {
-			w.messagePool.Remove(mc)
+			w.messageSource.Remove(mc)
+		} else {
+			log.Warningf("failed to get CID from message", err)
 		}
 	}
 

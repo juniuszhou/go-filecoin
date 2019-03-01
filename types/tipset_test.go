@@ -7,8 +7,8 @@ import (
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
 var (
@@ -47,7 +47,7 @@ func block(require *require.Assertions, height int, parentCid cid.Cid, parentWei
 		Nonce:           7,
 		Messages:        []*SignedMessage{sm1},
 		StateRoot:       SomeCid(),
-		MessageReceipts: []*MessageReceipt{{ExitCode: 1, Return: []Bytes{ret}}},
+		MessageReceipts: []*MessageReceipt{{ExitCode: 1, Return: [][]byte{ret}}},
 	}
 }
 
@@ -60,29 +60,29 @@ func TestTipSet(t *testing.T) {
 	b3 := block(require, 1, cid1, uint64(1137), "3")
 
 	ts := TipSet{}
-	ts[b1.Cid().String()] = b1
+	ts[b1.Cid()] = b1
 
 	ts2 := ts.Clone()
 	assert.Equal(ts2, ts) // note: assert.Equal() does a deep comparison, not same as Golang == operator
 	assert.False(&ts2 == &ts)
 
-	ts[b2.Cid().String()] = b2
+	ts[b2.Cid()] = b2
 	assert.NotEqual(ts2, ts)
 	assert.Equal(2, len(ts))
 	assert.Equal(1, len(ts2))
 
 	ts2 = ts.Clone()
 	assert.Equal(ts2, ts)
-	ts2[b1.Cid().String()] = b3
+	ts2[b1.Cid()] = b3
 	assert.NotEqual(ts2, ts)
-	assert.Equal([]byte("3"), ts2[b1.Cid().String()].Messages[0].Params)
-	assert.Equal([]byte("1"), ts[b1.Cid().String()].Messages[0].Params)
+	assert.Equal([]byte("3"), ts2[b1.Cid()].Messages[0].Params)
+	assert.Equal([]byte("1"), ts[b1.Cid()].Messages[0].Params)
 
 	// The actual values inside the TipSets are not copied - we assume they are used immutably.
 	ts2 = ts.Clone()
 	assert.Equal(ts2, ts)
-	oldB1 := ts[b1.Cid().String()]
-	ts[oldB1.Cid().String()].Nonce = 17
+	oldB1 := ts[b1.Cid()]
+	ts[oldB1.Cid()].Nonce = 17
 	assert.Equal(ts2, ts)
 }
 
@@ -153,12 +153,13 @@ func TestNewTipSet(t *testing.T) {
 	// Valid blocks
 	ts, err := NewTipSet(b1, b2, b3)
 	assert.NoError(err)
-	assert.Equal(ts[b1.Cid().String()], b1)
-	assert.Equal(ts[b2.Cid().String()], b2)
-	assert.Equal(ts[b3.Cid().String()], b3)
+	assert.Equal(ts[b1.Cid()], b1)
+	assert.Equal(ts[b2.Cid()], b2)
+	assert.Equal(ts[b3.Cid()], b3)
 	assert.Equal(3, len(ts))
 
 	// Invalid heights
+	b1, b2, b3 = RequireTestBlocks(t)
 	b1.Height = 3
 	ts, err = NewTipSet(b1, b2, b3)
 	assert.Error(err)
@@ -166,6 +167,7 @@ func TestNewTipSet(t *testing.T) {
 	b1.Height = b2.Height
 
 	// Invalid parent sets
+	b1, b2, b3 = RequireTestBlocks(t)
 	b1.Parents = NewSortedCidSet(cid1, cid2)
 	ts, err = NewTipSet(b1, b2, b3)
 	assert.Error(err)
@@ -173,6 +175,7 @@ func TestNewTipSet(t *testing.T) {
 	b1.Parents = b2.Parents
 
 	// Invalid parent weights
+	b1, b2, b3 = RequireTestBlocks(t)
 	b1.ParentWeight = Uint64(3000)
 	ts, err = NewTipSet(b1, b2, b3)
 	assert.Error(err)

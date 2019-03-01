@@ -8,11 +8,11 @@ import (
 	"time"
 
 	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
+	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
 func TestTriangleEncoding(t *testing.T) {
@@ -91,7 +91,7 @@ func TestTriangleEncoding(t *testing.T) {
 
 		b := &Block{
 			Miner:           newAddress(),
-			Ticket:          Bytes([]byte{0x01, 0x02, 0x03}),
+			Ticket:          []byte{0x01, 0x02, 0x03},
 			Height:          Uint64(2),
 			Nonce:           3,
 			Messages:        []*SignedMessage{newSignedMessage()},
@@ -104,7 +104,7 @@ func TestTriangleEncoding(t *testing.T) {
 		s := reflect.TypeOf(*b)
 		// This check is here to request that you add a non-zero value for new fields
 		// to the above (and update the field count below).
-		require.Equal(t, 10, s.NumField())
+		require.Equal(t, 12, s.NumField()) // Note: this also counts private fields
 		testRoundTrip(t, b)
 	})
 }
@@ -170,8 +170,8 @@ func TestDecodeBlock(t *testing.T) {
 			Messages:  []*SignedMessage{newSignedMessage(), newSignedMessage()},
 			StateRoot: c2,
 			MessageReceipts: []*MessageReceipt{
-				{ExitCode: 1, Return: []Bytes{[]byte{1, 2}}},
-				{ExitCode: 1, Return: []Bytes{[]byte{1, 2, 3}}},
+				{ExitCode: 1, Return: [][]byte{{1, 2}}},
+				{ExitCode: 1, Return: [][]byte{{1, 2, 3}}},
 			},
 		}
 
@@ -212,6 +212,19 @@ func TestEquals(t *testing.T) {
 	assert.False(b3.Equals(b4))
 }
 
+func TestParanoidPanic(t *testing.T) {
+	assert := assert.New(t)
+	paranoid = true
+
+	b1 := &Block{Nonce: 1}
+	b1.Cid()
+
+	b1.Nonce = 2
+	assert.Panics(func() {
+		b1.Cid()
+	})
+}
+
 func TestBlockJsonMarshal(t *testing.T) {
 	assert := assert.New(t)
 
@@ -227,7 +240,7 @@ func TestBlockJsonMarshal(t *testing.T) {
 	retVal := []byte{1, 2, 3}
 	receipt := &MessageReceipt{
 		ExitCode: 123,
-		Return:   []Bytes{retVal},
+		Return:   [][]byte{retVal},
 	}
 	child.Messages = []*SignedMessage{message}
 	child.MessageReceipts = []*MessageReceipt{receipt}
@@ -249,5 +262,5 @@ func TestBlockJsonMarshal(t *testing.T) {
 	assert.True(child.Equals(&unmarshalled))
 
 	assert.Equal(uint8(123), unmarshalled.MessageReceipts[0].ExitCode)
-	assert.Equal([]Bytes{[]byte{1, 2, 3}}, unmarshalled.MessageReceipts[0].Return)
+	assert.Equal([][]byte{{1, 2, 3}}, unmarshalled.MessageReceipts[0].Return)
 }

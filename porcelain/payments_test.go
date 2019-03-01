@@ -13,8 +13,8 @@ import (
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/exec"
 	"github.com/filecoin-project/go-filecoin/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
 const (
@@ -56,7 +56,7 @@ func newTestCreatePaymentsPlumbing() *paymentsTestPlumbing {
 		messageWait: func(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error {
 			return cb(nil, nil, &types.MessageReceipt{
 				ExitCode:   uint8(0),
-				Return:     []types.Bytes{channelID.Bytes()},
+				Return:     [][]byte{channelID.Bytes()},
 				GasAttoFIL: types.NewAttoFILFromFIL(9),
 			})
 		},

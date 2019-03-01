@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
-	"gx/ipfs/QmZMWMvWMVKCbHetJ4RgndbuEF1io2UpUxwQwtNjtYPzSC/go-ipfs-files"
+	"gx/ipfs/QmQmhotPUzVrMEWNK3x1R5jQ5ZHWyL7tVUrmRPjrBrvyCb/go-ipfs-files"
+	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -13,7 +13,6 @@ import (
 // Address is the interface that defines methods to manage Filecoin addresses and wallets.
 type Address interface {
 	Addrs() Addrs
-	Balance(ctx context.Context, addr address.Address) (*types.AttoFIL, error)
 	Import(ctx context.Context, f files.File) ([]address.Address, error)
 	Export(ctx context.Context, addrs []address.Address) ([]*types.KeyInfo, error)
 }

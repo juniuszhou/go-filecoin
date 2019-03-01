@@ -4,15 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 
+	"gx/ipfs/QmQmhotPUzVrMEWNK3x1R5jQ5ZHWyL7tVUrmRPjrBrvyCb/go-ipfs-files"
+	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
 	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
-	"gx/ipfs/QmZMWMvWMVKCbHetJ4RgndbuEF1io2UpUxwQwtNjtYPzSC/go-ipfs-files"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/api"
-	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/wallet"
 )
@@ -34,25 +32,9 @@ func (api *nodeAddress) Addrs() api.Addrs {
 	return api.addrs
 }
 
-func (api *nodeAddress) Balance(ctx context.Context, addr address.Address) (*types.AttoFIL, error) {
-	fcn := api.api.node
-
-	tree, err := fcn.ChainReader.LatestState(ctx)
-	if err != nil {
-		return types.ZeroAttoFIL, err
-	}
-
-	act, err := tree.GetActor(ctx, addr)
-	if err != nil {
-		if state.IsActorNotFoundError(err) {
-			// if the account doesn't exit, the balance should be zero
-			return types.NewAttoFILFromFIL(0), nil
-		}
-
-		return types.ZeroAttoFIL, err
-	}
-
-	return act.Balance, nil
+// WalletSerializeResult is the type wallet export and import return and expect.
+type WalletSerializeResult struct {
+	KeyInfo []*types.KeyInfo
 }
 
 type nodeAddrs struct {
@@ -86,6 +68,11 @@ func (api *nodeAddress) Import(ctx context.Context, f files.File) ([]address.Add
 	kinfos, err := parseKeyInfos(f)
 	if err != nil {
 		return nil, err
+	}
+
+	// error if we fail to parse keyinfo from the provided file.
+	if len(kinfos) == 0 {
+		return nil, fmt.Errorf("no keys in wallet file")
 	}
 
 	dsb := nd.Wallet.Backends(wallet.DSBackendType)
@@ -134,22 +121,9 @@ func (api *nodeAddress) Export(ctx context.Context, addrs []address.Address) ([]
 }
 
 func parseKeyInfos(f files.File) ([]*types.KeyInfo, error) {
-	var kinfos []*types.KeyInfo
-	for {
-		fi, err := f.NextFile()
-		switch err {
-		case io.EOF:
-			return kinfos, nil
-		case nil: // noop
-		default:
-			return nil, err
-		}
-
-		var ki types.KeyInfo
-		if err := json.NewDecoder(fi).Decode(&ki); err != nil {
-			return nil, err
-		}
-
-		kinfos = append(kinfos, &ki)
+	var wir *WalletSerializeResult
+	if err := json.NewDecoder(f).Decode(&wir); err != nil {
+		return nil, err
 	}
+	return wir.KeyInfo, nil
 }

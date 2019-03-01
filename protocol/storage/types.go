@@ -3,7 +3,7 @@ package storage
 import (
 	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
+	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -12,6 +12,7 @@ import (
 func init() {
 	cbor.RegisterCborType(PaymentInfo{})
 	cbor.RegisterCborType(DealProposal{})
+	cbor.RegisterCborType(SignedDealProposal{})
 	cbor.RegisterCborType(DealResponse{})
 	cbor.RegisterCborType(ProofInfo{})
 	cbor.RegisterCborType(queryRequest{})
@@ -60,8 +61,40 @@ type DealProposal struct {
 	// will use to pay the miner. It should be verifiable by the
 	// miner using on-chain information.
 	Payment PaymentInfo
+}
 
-	// Signature types.Signature
+// Unmarshal a DealProposal from bytes.
+func (dp *DealProposal) Unmarshal(b []byte) error {
+	return cbor.DecodeInto(b, dp)
+}
+
+// Marshal the DealProposal into bytes.
+func (dp *DealProposal) Marshal() ([]byte, error) {
+	return cbor.DumpObject(dp)
+}
+
+// NewSignedProposal signs DealProposal with address `addr` and returns a SignedDealProposal.
+func (dp *DealProposal) NewSignedProposal(addr address.Address, signer types.Signer) (*SignedDealProposal, error) {
+	data, err := dp.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	sig, err := signer.SignBytes(data, addr)
+	if err != nil {
+		return nil, err
+	}
+	return &SignedDealProposal{
+		DealProposal: *dp,
+		Signature:    sig,
+	}, nil
+}
+
+// SignedDealProposal is a deal proposal signed by the proposing client
+type SignedDealProposal struct {
+	DealProposal
+	// Signature is the signature of the client proposing the deal.
+	Signature types.Signature
 }
 
 // DealResponse is the information sent over the wire, when a miner responds to a client.

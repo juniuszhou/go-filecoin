@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 
 install_precompiled() {
-  RELEASE_SHA1=`git rev-parse @:./proofs/rust-proofs`
-  RELEASE_NAME="rust-proofs-`uname`"
+  RELEASE_SHA1=`git rev-parse @:./proofs/rust-fil-proofs`
+  RELEASE_NAME="rust-fil-proofs-`uname`"
   RELEASE_TAG="${RELEASE_SHA1:0:16}"
 
-  RELEASE_RESPONSE=`curl "https://api.github.com/repos/filecoin-project/rust-proofs/releases/tags/$RELEASE_TAG"`
+  RELEASE_RESPONSE=`curl \
+    --location \
+    "https://api.github.com/repos/filecoin-project/rust-fil-proofs/releases/tags/$RELEASE_TAG"
+  `
 
   RELEASE_ID=`echo $RELEASE_RESPONSE | jq '.id'`
 
@@ -40,6 +43,7 @@ install_precompiled() {
   mkdir -p proofs/bin
   mkdir -p proofs/include
   mkdir -p proofs/lib/pkgconfig
+  mkdir -p proofs/misc
 
   tar -C proofs -xzf /tmp/${TAR_NAME}.tar.gz
 }
@@ -51,9 +55,9 @@ install_local() {
     exit 1
   fi
 
-  git submodule update --init --recursive
+  git submodule update --init --recursive proofs/rust-fil-proofs
 
-  pushd proofs/rust-proofs
+  pushd proofs/rust-fil-proofs
 
   cargo --version
   cargo update
@@ -64,22 +68,25 @@ install_local() {
   mkdir -p proofs/bin
   mkdir -p proofs/include
   mkdir -p proofs/lib/pkgconfig
+  mkdir -p proofs/misc
 
-  cp proofs/rust-proofs/target/release/paramcache ./proofs/bin/
-  cp proofs/rust-proofs/target/release/libfilecoin_proofs.h ./proofs/include/
-  cp proofs/rust-proofs/target/release/libfilecoin_proofs.a ./proofs/lib/
-  cp proofs/rust-proofs/target/release/libfilecoin_proofs.pc ./proofs/lib/pkgconfig/
+  cp proofs/rust-fil-proofs/parameters.json ./proofs/misc/
+  cp proofs/rust-fil-proofs/target/release/paramcache ./proofs/bin/
+  cp proofs/rust-fil-proofs/target/release/paramfetch ./proofs/bin/
+  cp proofs/rust-fil-proofs/target/release/libfilecoin_proofs.h ./proofs/include/
+  cp proofs/rust-fil-proofs/target/release/libfilecoin_proofs.a ./proofs/lib/
+  cp proofs/rust-fil-proofs/target/release/libfilecoin_proofs.pc ./proofs/lib/pkgconfig/
 }
 
 if [ -z "$FILECOIN_USE_PRECOMPILED_RUST_PROOFS" ]; then
-  echo "using local rust-proofs"
+  echo "using local rust-fil-proofs"
   install_local
 else
-  echo "using precompiled rust-proofs"
+  echo "using precompiled rust-fil-proofs"
   install_precompiled
 
   if [ $? -ne "0" ]; then
-    echo "failed to find or obtain precompiled rust-proofs, falling back to local"
+    echo "failed to find or obtain precompiled rust-fil-proofs, falling back to local"
     install_local
   fi
 fi

@@ -102,16 +102,6 @@ func runCapture(name string) string {
 	return strings.Trim(string(output), lineBreak)
 }
 
-// hydrateParamCache hydrates the groth parameter cache used when sealing a
-// sector to ensure consistent test runs. If the cache is hydrated lazily (the
-// first time that seal runs), a test could take longer than expected and time
-// out.
-func hydrateParamCache() []command {
-	return []command{
-		cmd("./proofs/bin/paramcache"),
-	}
-}
-
 // deps installs all dependencies
 func deps() {
 	runCmd(cmd("pkg-config --version"))
@@ -138,8 +128,9 @@ func deps() {
 		cmd("go get -u github.com/prometheus/client_golang/prometheus/promhttp"),
 		cmd("go get -u github.com/jstemmer/go-junit-report"),
 		cmd("go get -u github.com/pmezard/go-difflib/difflib"),
-		cmd("./scripts/install-rust-proofs.sh"),
+		cmd("./scripts/install-rust-fil-proofs.sh"),
 		cmd("./scripts/install-bls-signatures.sh"),
+		cmd("./proofs/bin/paramfetch fetch --all --json=./proofs/misc/parameters.json"),
 		cmd("./proofs/bin/paramcache"),
 		cmd("./scripts/copy-groth-params.sh"),
 	}
@@ -160,11 +151,12 @@ func smartdeps() {
 		cmd("gx install"),
 		cmd("gx-go rewrite"),
 		cmd("gometalinter --install"),
-		cmd("./scripts/install-rust-proofs.sh"),
+		cmd("./scripts/install-rust-fil-proofs.sh"),
 		cmd("./scripts/install-bls-signatures.sh"),
+		cmd("./proofs/bin/paramfetch fetch --all --json=./proofs/misc/parameters.json"),
+		cmd("./proofs/bin/paramcache"),
+		cmd("./scripts/copy-groth-params.sh"),
 	}
-
-	cmds = append(cmds, hydrateParamCache()...)
 
 	// packages we need to install
 	pkgs := []string{
@@ -268,6 +260,26 @@ func build() {
 	generateGenesis()
 }
 
+func forcebuild() {
+	forceBuildFC()
+	buildGengen()
+	buildFaucet()
+	buildGenesisFileServer()
+	generateGenesis()
+}
+
+func forceBuildFC() {
+	log.Println("Force building go-filecoin...")
+
+	commit := runCapture("git log -n 1 --format=%H")
+
+	runCmd(cmd([]string{
+		"go", "build",
+		"-ldflags", fmt.Sprintf("-X github.com/filecoin-project/go-filecoin/flags.Commit=%s", commit),
+		"-a", "-v", "-o", "go-filecoin", ".",
+	}...))
+}
+
 func generateGenesis() {
 	log.Println("Generating genesis...")
 	runCmd(cmd([]string{
@@ -350,6 +362,8 @@ func main() {
 		generateGenesis()
 	case "build":
 		build()
+	case "fbuild":
+		forcebuild()
 	case "test":
 		test(args[1:]...)
 	case "install":

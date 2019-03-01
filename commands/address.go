@@ -1,13 +1,16 @@
 package commands
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 
-	"gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
+	"gx/ipfs/QmQmhotPUzVrMEWNK3x1R5jQ5ZHWyL7tVUrmRPjrBrvyCb/go-ipfs-files"
+	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds"
 	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
 
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/api/impl"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -123,7 +126,7 @@ var balanceCmd = &cmds.Command{
 			return err
 		}
 
-		balance, err := GetAPI(env).Address().Balance(req.Context, addr)
+		balance, err := GetPorcelainAPI(env).WalletBalance(req.Context, addr)
 		if err != nil {
 			return err
 		}
@@ -142,7 +145,17 @@ var walletImportCmd = &cmds.Command{
 		cmdkit.FileArg("walletFile", true, false, "File containing wallet data to import").EnableStdin(),
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		addrs, err := GetAPI(env).Address().Import(req.Context, req.Files)
+		iter := req.Files.Entries()
+		if !iter.Next() {
+			return fmt.Errorf("no file given: %s", iter.Err())
+		}
+
+		fi, ok := iter.Node().(files.File)
+		if !ok {
+			return fmt.Errorf("given file was not a files.File")
+		}
+
+		addrs, err := GetAPI(env).Address().Import(req.Context, fi)
 		if err != nil {
 			return err
 		}
@@ -168,11 +181,6 @@ var walletImportCmd = &cmds.Command{
 	},
 }
 
-// WalletExportResult is the resut of running the wallet export command.
-type WalletExportResult struct {
-	KeyInfo []*types.KeyInfo
-}
-
 var walletExportCmd = &cmds.Command{
 	Arguments: []cmdkit.Argument{
 		cmdkit.StringArg("addresses", true, true, "Addresses of keys to export").EnableStdin(),
@@ -192,20 +200,21 @@ var walletExportCmd = &cmds.Command{
 			return err
 		}
 
-		var klr WalletExportResult
+		var klr impl.WalletSerializeResult
 		klr.KeyInfo = append(klr.KeyInfo, kis...)
 
 		return re.Emit(klr)
 	},
-	Type: &WalletExportResult{},
+	Type: &impl.WalletSerializeResult{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, klr *WalletExportResult) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, klr *impl.WalletSerializeResult) error {
 			for _, k := range klr.KeyInfo {
 				a, err := k.Address()
 				if err != nil {
 					return err
 				}
-				_, err = fmt.Fprintf(w, "Address:\t%s\nPrivateKey:\t%x\nCurve:\t\t%s\n\n", a.String(), k.PrivateKey, k.Curve)
+				privateKeyInBase64 := base64.StdEncoding.EncodeToString(k.PrivateKey)
+				_, err = fmt.Fprintf(w, "Address:\t%s\nPrivateKey:\t%s\nCurve:\t\t%s\n\n", a.String(), privateKeyInBase64, k.Curve)
 				if err != nil {
 					return err
 				}

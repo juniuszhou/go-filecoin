@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
 )
 
 var hashes = make([][]byte, 5)
@@ -140,7 +140,7 @@ func TestChecksum(t *testing.T) {
 	checksum := createChecksum(hrp, data)
 	assert.Len(checksum, 6)
 
-	combined := append(data, []byte(checksum)...)
+	combined := append(data, checksum...)
 	assert.True(verifyChecksum(hrp, combined))
 }
 

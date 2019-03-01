@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVRxA4J3UPQpw74dLrQ6NJkfysCA1H4GU28gVpXQt9zMU/go-libp2p-pubsub"
 	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
 
+	"github.com/filecoin-project/go-filecoin/pubsub"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -30,10 +30,10 @@ func (node *Node) AddNewBlock(ctx context.Context, b *types.Block) (err error) {
 
 	// TODO: should this just be a cid? Right now receivers ask to fetch
 	// the block over bitswap anyway.
-	return node.PubSub.Publish(BlockTopic, b.ToNode().RawData())
+	return node.PorcelainAPI.PubSubPublish(BlockTopic, b.ToNode().RawData())
 }
 
-func (node *Node) processBlock(ctx context.Context, pubSubMsg *pubsub.Message) (err error) {
+func (node *Node) processBlock(ctx context.Context, pubSubMsg pubsub.Message) (err error) {
 	// ignore messages from ourself
 	if pubSubMsg.GetFrom() == node.Host().ID() {
 		return nil
