@@ -1,0 +1,19 @@
+environment variables:
+#FIL_API=
+FIL_PATH=/data/ipfs_data
+#FIL_USE_SMALL_SECTORS=
+#GO_FILECOIN_LOG_LEVEL=
+#GO_FILECOIN_LOG_JSON=
+
+1. daemon
+go-filecoin daemon
+
+2. config
+go-filecoin init --devnet-user --genesisfile=http://user.kittyhawk.wtf:8020/genesis.car
+
+3. swarm
+
+4. mining
+
+
+

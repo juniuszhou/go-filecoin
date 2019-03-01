@@ -1,0 +1,4 @@
+1. genesis generator
+gengen --keypath fixtures --out-car fixtures/genesis.car --out-json fixtures/gen.json --config ./fixtures/setup.json
+
+2.
