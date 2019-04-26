@@ -6,25 +6,109 @@ import (
 	"fmt"
 	"math/big"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/libp2p/go-libp2p-peer"
+	"github.com/pkg/errors"
 
 	minerActor "github.com/filecoin-project/go-filecoin/actor/builtin/miner"
+	"github.com/filecoin-project/go-filecoin/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/exec"
 	"github.com/filecoin-project/go-filecoin/types"
 	vmErrors "github.com/filecoin-project/go-filecoin/vm/errors"
 	w "github.com/filecoin-project/go-filecoin/wallet"
 )
 
+// mcAPI is the subset of the plumbing.API that MinerCreate uses.
+type mcAPI interface {
+	ConfigGet(dottedPath string) (interface{}, error)
+	ConfigSet(dottedPath string, paramJSON string) error
+	MessageSendWithDefaultAddress(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error)
+	MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error
+	WalletDefaultAddress() (address.Address, error)
+	WalletGetPubKeyForAddress(addr address.Address) ([]byte, error)
+}
+
+// MinerCreate creates a new miner actor for the given account and returns its address.
+// It will wait for the the actor to appear on-chain and add set the address to mining.minerAddress in the config.
+// TODO: add ability to pass in a KeyInfo to store for signing blocks.
+//       See https://github.com/filecoin-project/go-filecoin/issues/1843
+func MinerCreate(
+	ctx context.Context,
+	plumbing mcAPI,
+	minerOwnerAddr address.Address,
+	gasPrice types.AttoFIL,
+	gasLimit types.GasUnits,
+	pledge uint64,
+	pid peer.ID,
+	collateral *types.AttoFIL,
+) (_ *address.Address, err error) {
+	if minerOwnerAddr == (address.Address{}) {
+		minerOwnerAddr, err = plumbing.WalletDefaultAddress()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ctx = log.Start(ctx, "Node.CreateMiner")
+	defer func() {
+		log.FinishWithErr(ctx, err)
+	}()
+
+	addr, err := plumbing.ConfigGet("mining.minerAddress")
+	if err != nil {
+		return nil, err
+	}
+	if (addr != address.Address{}) {
+		return nil, fmt.Errorf("can only have one miner per node")
+	}
+
+	pubKey, err := plumbing.WalletGetPubKeyForAddress(minerOwnerAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	smsgCid, err := plumbing.MessageSendWithDefaultAddress(
+		ctx,
+		minerOwnerAddr,
+		address.StorageMarketAddress,
+		collateral,
+		gasPrice,
+		gasLimit,
+		"createMiner",
+		big.NewInt(int64(pledge)),
+		pubKey,
+		pid,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var minerAddr address.Address
+	err = plumbing.MessageWait(ctx, smsgCid, func(blk *types.Block, smsg *types.SignedMessage, receipt *types.MessageReceipt) (err error) {
+		if receipt.ExitCode != uint8(0) {
+			return vmErrors.VMExitCodeToError(receipt.ExitCode, storagemarket.Errors)
+		}
+		minerAddr, err = address.NewFromBytes(receipt.Return[0])
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err = plumbing.ConfigSet("mining.minerAddress", minerAddr.String()); err != nil {
+		return nil, err
+	}
+
+	return &minerAddr, nil
+}
+
 // mpcAPI is the subset of the plumbing.API that MinerPreviewCreate uses.
 type mpcAPI interface {
 	ConfigGet(dottedPath string) (interface{}, error)
-	GetAndMaybeSetDefaultSenderAddress() (address.Address, error)
 	MessagePreview(ctx context.Context, from, to address.Address, method string, params ...interface{}) (types.GasUnits, error)
 	NetworkGetPeerID() peer.ID
+	WalletDefaultAddress() (address.Address, error)
 	WalletFind(address address.Address) (w.Backend, error)
 }
 
@@ -37,8 +121,8 @@ func MinerPreviewCreate(
 	pid peer.ID,
 	collateral *types.AttoFIL,
 ) (usedGas types.GasUnits, err error) {
-	if fromAddr == (address.Address{}) {
-		fromAddr, err = plumbing.GetAndMaybeSetDefaultSenderAddress()
+	if fromAddr.Empty() {
+		fromAddr, err = plumbing.WalletDefaultAddress()
 		if err != nil {
 			return types.NewGasUnits(0), err
 		}
@@ -65,10 +149,7 @@ func MinerPreviewCreate(
 	if err != nil {
 		return types.NewGasUnits(0), err
 	}
-	pubkey, err := info.PublicKey()
-	if err != nil {
-		return types.NewGasUnits(0), err
-	}
+	pubkey := info.PublicKey()
 
 	usedGas, err = plumbing.MessagePreview(
 		ctx,
@@ -201,27 +282,37 @@ func MinerPreviewSetPrice(ctx context.Context, plumbing mpspAPI, from address.Ad
 
 // mgoaAPI is the subset of the plumbing.API that MinerGetOwnerAddress uses.
 type mgoaAPI interface {
-	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, *exec.FunctionSignature, error)
+	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
 }
 
 // MinerGetOwnerAddress queries for the owner address of the given miner
 func MinerGetOwnerAddress(ctx context.Context, plumbing mgoaAPI, minerAddr address.Address) (address.Address, error) {
-	res, _, err := plumbing.MessageQuery(ctx, address.Address{}, minerAddr, "getOwner")
+	res, err := plumbing.MessageQuery(ctx, address.Undef, minerAddr, "getOwner")
 	if err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
 	return address.NewFromBytes(res[0])
 }
 
+// MinerGetKey queries for the public key of the given miner
+func MinerGetKey(ctx context.Context, plumbing mgoaAPI, minerAddr address.Address) ([]byte, error) {
+	res, err := plumbing.MessageQuery(ctx, address.Undef, minerAddr, "getKey")
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return res[0], nil
+}
+
 // mgaAPI is the subset of the plumbing.API that MinerGetAsk uses.
 type mgaAPI interface {
-	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, *exec.FunctionSignature, error)
+	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
 }
 
 // MinerGetAsk queries for an ask of the given miner
 func MinerGetAsk(ctx context.Context, plumbing mgaAPI, minerAddr address.Address, askID uint64) (minerActor.Ask, error) {
-	ret, _, err := plumbing.MessageQuery(ctx, address.Address{}, minerAddr, "getAsk", big.NewInt(int64(askID)))
+	ret, err := plumbing.MessageQuery(ctx, address.Undef, minerAddr, "getAsk", big.NewInt(int64(askID)))
 	if err != nil {
 		return minerActor.Ask{}, err
 	}
@@ -236,12 +327,12 @@ func MinerGetAsk(ctx context.Context, plumbing mgaAPI, minerAddr address.Address
 
 // mgpidAPI is the subset of the plumbing.API that MinerGetPeerID uses.
 type mgpidAPI interface {
-	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, *exec.FunctionSignature, error)
+	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
 }
 
 // MinerGetPeerID queries for the peer id of the given miner
 func MinerGetPeerID(ctx context.Context, plumbing mgpidAPI, minerAddr address.Address) (peer.ID, error) {
-	res, _, err := plumbing.MessageQuery(ctx, address.Address{}, minerAddr, "getPeerID")
+	res, err := plumbing.MessageQuery(ctx, address.Undef, minerAddr, "getPeerID")
 	if err != nil {
 		return "", err
 	}

@@ -1,29 +1,22 @@
 package porcelain
 
 import (
-	"context"
-	"errors"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
-type chPlumbing interface {
-	ChainLs(ctx context.Context) <-chan interface{}
+type chBlockHeightPlumbing interface {
+	ChainHead() (*types.TipSet, error)
 }
 
 // ChainBlockHeight determines the current block height
-func ChainBlockHeight(ctx context.Context, plumbing chPlumbing) (*types.BlockHeight, error) {
-	lsCtx, cancelLs := context.WithCancel(ctx)
-	tipSetCh := plumbing.ChainLs(lsCtx)
-	head := <-tipSetCh
-	cancelLs()
-
-	if head == nil {
-		return nil, errors.New("could not retrieve block height")
-	}
-
-	currentHeight, err := head.(types.TipSet).Height()
+func ChainBlockHeight(plumbing chBlockHeightPlumbing) (*types.BlockHeight, error) {
+	head, err := plumbing.ChainHead()
 	if err != nil {
 		return nil, err
 	}
-	return types.NewBlockHeight(currentHeight), nil
+	height, err := head.Height()
+	if err != nil {
+		return nil, err
+	}
+	return types.NewBlockHeight(height), nil
 }

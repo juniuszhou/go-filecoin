@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"io"
 
-	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-cid"
+	cmdkit "github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
 )
 
 var miningCmd = &cmds.Command{
@@ -22,7 +22,7 @@ var miningCmd = &cmds.Command{
 
 var miningOnceCmd = &cmds.Command{
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		blk, err := GetAPI(env).Mining().Once(req.Context)
+		blk, err := GetBlockAPI(env).MiningOnce(req.Context)
 		if err != nil {
 			return err
 		}
@@ -39,7 +39,7 @@ var miningOnceCmd = &cmds.Command{
 
 var miningStartCmd = &cmds.Command{
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		if err := GetAPI(env).Mining().Start(req.Context); err != nil {
+		if err := GetBlockAPI(env).MiningStart(req.Context); err != nil {
 			return err
 		}
 		return re.Emit("Started mining")
@@ -50,9 +50,7 @@ var miningStartCmd = &cmds.Command{
 
 var miningStopCmd = &cmds.Command{
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		if err := GetAPI(env).Mining().Stop(req.Context); err != nil {
-			return err
-		}
+		GetBlockAPI(env).MiningStop(req.Context)
 		return re.Emit("Stopped mining")
 	},
 	Encoders: stringEncoderMap,

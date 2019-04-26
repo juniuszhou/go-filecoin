@@ -5,10 +5,11 @@ import (
 	"io"
 	"strings"
 
-	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds"
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
-	oldlogging "gx/ipfs/QmcaSwFc5RBg8yCq54QURwEU4nwjfCpjbpmaAm4VbdGLKv/go-logging"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
+	logging "github.com/ipfs/go-log"
+	writer "github.com/ipfs/go-log/writer"
+	oldlogging "github.com/whyrusleeping/go-logging"
 )
 
 var loglogger = logging.Logger("commands/log")
@@ -38,7 +39,14 @@ Outputs event log messages (not other log messages) as they are generated.
 	},
 
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		r := GetAPI(env).Log().Tail(req.Context)
+		r, w := io.Pipe()
+		go func() {
+			defer w.Close() // nolint: errcheck
+			<-req.Context.Done()
+		}()
+
+		writer.WriterGroup.AddWriter(w)
+
 		return re.Emit(r)
 	},
 }

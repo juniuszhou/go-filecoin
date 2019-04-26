@@ -5,9 +5,9 @@ import (
 	"math/big"
 	"reflect"
 
-	"gx/ipfs/QmSKyB5faguXT4NqbrXpnRXqaVj5DhSm7x9BtzFydBY1UK/go-leb128"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/filecoin-project/go-leb128"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/libp2p/go-libp2p-peer"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -46,6 +46,14 @@ const (
 	SectorID
 	// CommitmentsMap is a map of stringified sector id (uint64) to commitments
 	CommitmentsMap
+	// PoStProofs is an array of proof-of-spacetime proofs
+	PoStProofs
+	// Boolean is a bool
+	Boolean
+	// ProofsMode is an enumeration of possible modes of proof operation
+	ProofsMode
+	// Predicate is subset of a message used to ask an actor about a condition
+	Predicate
 )
 
 func (t Type) String() string {
@@ -75,7 +83,15 @@ func (t Type) String() string {
 	case SectorID:
 		return "uint64"
 	case CommitmentsMap:
-		return "map[string]Commitments"
+		return "map[string]types.Commitments"
+	case PoStProofs:
+		return "[]types.PoStProof"
+	case Boolean:
+		return "bool"
+	case ProofsMode:
+		return "types.ProofsMode"
+	case Predicate:
+		return "*types.Predicate"
 	default:
 		return "<unknown type>"
 	}
@@ -115,6 +131,14 @@ func (av *Value) String() string {
 		return fmt.Sprint(av.Val.(uint64))
 	case CommitmentsMap:
 		return fmt.Sprint(av.Val.(map[string]types.Commitments))
+	case PoStProofs:
+		return fmt.Sprint(av.Val.([]types.PoStProof))
+	case Boolean:
+		return fmt.Sprint(av.Val.(bool))
+	case ProofsMode:
+		return fmt.Sprint(av.Val.(types.ProofsMode))
+	case Predicate:
+		return fmt.Sprint(av.Val.(*types.Predicate))
 	default:
 		return "<unknown type>"
 	}
@@ -137,7 +161,7 @@ func (av *Value) Serialize() ([]byte, error) {
 	case Address:
 		addr, ok := av.Val.(address.Address)
 		if !ok {
-			return nil, &typeError{address.Address{}, av.Val}
+			return nil, &typeError{address.Undef, av.Val}
 		}
 		return addr.Bytes(), nil
 	case AttoFIL:
@@ -214,6 +238,39 @@ func (av *Value) Serialize() ([]byte, error) {
 		}
 
 		return cbor.DumpObject(m)
+	case PoStProofs:
+		m, ok := av.Val.([]types.PoStProof)
+		if !ok {
+			return nil, &typeError{[]types.PoStProof{}, av.Val}
+		}
+
+		return cbor.DumpObject(m)
+	case Boolean:
+		v, ok := av.Val.(bool)
+		if !ok {
+			return nil, &typeError{false, av.Val}
+		}
+
+		var b byte
+		if v {
+			b = 1
+		}
+
+		return []byte{b}, nil
+	case ProofsMode:
+		v, ok := av.Val.(types.ProofsMode)
+		if !ok {
+			return nil, &typeError{types.TestProofsMode, av.Val}
+		}
+
+		return []byte{byte(v)}, nil
+	case Predicate:
+		p, ok := av.Val.(*types.Predicate)
+		if !ok {
+			return nil, &typeError{&types.Predicate{}, av.Val}
+		}
+
+		return cbor.DumpObject(p)
 	default:
 		return nil, fmt.Errorf("unrecognized Type: %d", av.Type)
 	}
@@ -253,6 +310,14 @@ func ToValues(i []interface{}) ([]*Value, error) {
 			out = append(out, &Value{Type: SectorID, Val: v})
 		case map[string]types.Commitments:
 			out = append(out, &Value{Type: CommitmentsMap, Val: v})
+		case []types.PoStProof:
+			out = append(out, &Value{Type: PoStProofs, Val: v})
+		case bool:
+			out = append(out, &Value{Type: Boolean, Val: v})
+		case types.ProofsMode:
+			out = append(out, &Value{Type: ProofsMode, Val: v})
+		case *types.Predicate:
+			out = append(out, &Value{Type: Predicate, Val: v})
 		default:
 			return nil, fmt.Errorf("unsupported type: %T", v)
 		}
@@ -347,7 +412,6 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 			Type: t,
 			Val:  leb128.ToUInt64(data),
 		}, nil
-
 	case CommitmentsMap:
 		var m map[string]types.Commitments
 		if err := cbor.DecodeInto(data, &m); err != nil {
@@ -356,6 +420,38 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 		return &Value{
 			Type: t,
 			Val:  m,
+		}, nil
+	case PoStProofs:
+		var slice []types.PoStProof
+		if err := cbor.DecodeInto(data, &slice); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  slice,
+		}, nil
+	case Boolean:
+		var b bool
+		if data[0] == 1 {
+			b = true
+		}
+		return &Value{
+			Type: t,
+			Val:  b,
+		}, nil
+	case ProofsMode:
+		return &Value{
+			Type: t,
+			Val:  types.ProofsMode(int(data[0])),
+		}, nil
+	case Predicate:
+		var predicate *types.Predicate
+		if err := cbor.DecodeInto(data, &predicate); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  predicate,
 		}, nil
 	case Invalid:
 		return nil, ErrInvalidType
@@ -377,6 +473,10 @@ var typeTable = map[Type]reflect.Type{
 	PeerID:         reflect.TypeOf(peer.ID("")),
 	SectorID:       reflect.TypeOf(uint64(0)),
 	CommitmentsMap: reflect.TypeOf(map[string]types.Commitments{}),
+	PoStProofs:     reflect.TypeOf([]types.PoStProof{}),
+	Boolean:        reflect.TypeOf(false),
+	ProofsMode:     reflect.TypeOf(types.TestProofsMode),
+	Predicate:      reflect.TypeOf(&types.Predicate{}),
 }
 
 // TypeMatches returns whether or not 'val' is the go type expected for the given ABI type

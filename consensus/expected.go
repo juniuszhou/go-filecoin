@@ -1,5 +1,8 @@
 package consensus
 
+// This is to implement Expected Consensus protocol
+// See: https://github.com/filecoin-project/specs/blob/master/expected-consensus.md
+
 import (
 	"bytes"
 	"context"
@@ -8,12 +11,12 @@ import (
 	"math/big"
 	"strings"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
-	"gx/ipfs/QmcTzQXRcU2vf8yX5EEboz1BSvWC7wWmeYAKVQmhp8WZYU/sha256-simd"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	logging "github.com/ipfs/go-log"
+	"github.com/minio/sha256-simd"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
@@ -31,7 +34,9 @@ var (
 
 func init() {
 	ticketDomain = &big.Int{}
-	ticketDomain.Exp(big.NewInt(2), big.NewInt(256), nil)
+	// The size of the ticket domain must equal the size of the Signature (ticket) generated.
+	// Currently this is a secp256k1.Sign signature, which is 65 bytes.
+	ticketDomain.Exp(big.NewInt(2), big.NewInt(65*8), nil)
 	ticketDomain.Sub(ticketDomain, big.NewInt(1))
 }
 
@@ -44,6 +49,12 @@ var (
 	ErrUnorderedTipSets = errors.New("trying to order two identical tipsets")
 )
 
+// TicketSigner is an interface for a test signer that can create tickets.
+type TicketSigner interface {
+	GetAddressForPubKey(pk []byte) (address.Address, error)
+	SignBytes(data []byte, signerAddr address.Address) (types.Signature, error)
+}
+
 // TODO none of these parameters are chosen correctly
 // with respect to analysis under a security model:
 // https://github.com/filecoin-project/go-filecoin/issues/1846
@@ -54,13 +65,9 @@ const ECV uint64 = 10
 // ECPrM is the power ratio magnitude defined in the EC spec.
 const ECPrM uint64 = 100
 
-// LookBackParameter is the protocol parameter defining how many blocks in the
-// past to look back to sample randomness values.
-const LookBackParameter = 3
-
 // AncestorRoundsNeeded is the number of rounds of the ancestor chain needed
 // to process all state transitions.
-var AncestorRoundsNeeded = miner.ProvingPeriodBlocks.Add(miner.GracePeriodBlocks)
+const AncestorRoundsNeeded = miner.ProvingPeriodBlocks + miner.GracePeriodBlocks
 
 // A Processor processes all the messages in a block or tip set.
 type Processor interface {
@@ -265,18 +272,12 @@ func (c *Expected) RunStateTransition(ctx context.Context, ts types.TipSet, ance
 // validateMining checks validity of the block ticket, proof, and miner address.
 //    Returns an error if:
 //    	* any tipset's block was mined by an invalid miner address.
-//      * the block ticket is incorrectly computed
+//      * the block proof is invalid for the challenge
 //      * the block ticket fails the power check, i.e. is not a winning ticket
 //    Returns nil if all the above checks pass.
 // See https://github.com/filecoin-project/specs/blob/master/mining.md#chain-validation
 func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts types.TipSet, parentTs types.TipSet) error {
 	for _, blk := range ts.ToSlice() {
-		computedTicket := CreateTicket(blk.Proof, blk.Miner)
-
-		if !bytes.Equal(blk.Ticket, computedTicket) {
-			return errors.New("ticket incorrectly computed")
-		}
-
 		// TODO: Also need to validate BlockSig
 
 		// TODO: Once we've picked a delay function (see #2119), we need to
@@ -298,7 +299,8 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts types.T
 
 // IsWinningTicket fetches miner power & total power, returns true if it's a winning ticket, false if not,
 //    errors out if minerPower or totalPower can't be found.
-//    See https://github.com/filecoin-project/aq/issues/70 for an explanation of the math here.
+//    See https://github.com/filecoin-project/specs/blob/master/expected-consensus.md
+//    for an explanation of the math here.
 func IsWinningTicket(ctx context.Context, bs blockstore.Blockstore, ptv PowerTableView, st state.Tree,
 	ticket types.Signature, miner address.Address) (bool, error) {
 
@@ -330,10 +332,10 @@ func CompareTicketPower(ticket types.Signature, minerPower uint64, totalPower ui
 //   TODO -- in general this won't work with only the base tipset.
 //     We'll potentially need some chain manager utils, similar to
 //     the State function, to sample further back in the chain.
-func CreateChallengeSeed(parents types.TipSet, nullBlkCount uint64) (proofs.PoStChallengeSeed, error) {
+func CreateChallengeSeed(parents types.TipSet, nullBlkCount uint64) (types.PoStChallengeSeed, error) {
 	smallest, err := parents.MinTicket()
 	if err != nil {
-		return proofs.PoStChallengeSeed{}, err
+		return types.PoStChallengeSeed{}, err
 	}
 
 	buf := make([]byte, binary.MaxVarintLen64)
@@ -342,19 +344,6 @@ func CreateChallengeSeed(parents types.TipSet, nullBlkCount uint64) (proofs.PoSt
 
 	h := sha256.Sum256(buf)
 	return h, nil
-}
-
-// CreateTicket computes a valid ticket using the supplied proof
-// []byte and the minerAddress address.Address.
-//    returns:  []byte -- the ticket.
-func CreateTicket(proof proofs.PoStProof, minerAddr address.Address) []byte {
-	// TODO: the ticket is supposed to be a signature, per the spec.
-	// For now to ensure that the ticket is unique to each miner mix in
-	// the miner address.
-	// https://github.com/filecoin-project/go-filecoin/issues/1054
-	buf := append(proof[:], minerAddr.Bytes()...)
-	h := sha256.Sum256(buf)
-	return h[:]
 }
 
 // runMessages applies the messages of all blocks within the input
@@ -410,4 +399,22 @@ func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.Storag
 		return nil, errors.Wrap(err, "error validating tipset")
 	}
 	return st, nil
+}
+
+// CreateTicket computes a valid ticket.
+// 	params:  proof  []byte, the proof to sign
+// 			 signerPubKey []byte, the public key for the signer. Must exist in the signer
+//      	 signer, implements TicketSigner interface. Must have signerPubKey in its keyinfo.
+//  returns:  types.Signature ( []byte ), error
+func CreateTicket(proof types.PoStProof, signerPubKey []byte, signer TicketSigner) (types.Signature, error) {
+
+	var ticket types.Signature
+
+	signerAddr, err := signer.GetAddressForPubKey(signerPubKey)
+	if err != nil {
+		return ticket, errors.Wrap(err, "could not get address for signerPubKey")
+	}
+	buf := append(proof[:], signerAddr.Bytes()...)
+	// Don't hash it here; it gets hashed in walletutil.Sign
+	return signer.SignBytes(buf[:], signerAddr)
 }

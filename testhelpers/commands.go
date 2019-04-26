@@ -18,17 +18,17 @@ import (
 	"testing"
 	"time"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmZcLBXKaFe8ND5YHPkJRAwmhJGrVsi1JqDZNyJ4nRK5Mj/go-multiaddr-net"
+	"github.com/ipfs/go-cid"
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multiaddr-net"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/config"
 	"github.com/filecoin-project/go-filecoin/types"
 
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -102,6 +102,7 @@ type TestDaemon struct {
 	keyFiles         []string
 	withMiner        string
 	autoSealInterval string
+	isRelay          bool
 
 	firstRun bool
 	init     bool
@@ -468,16 +469,14 @@ func (td *TestDaemon) WaitForAPI() error {
 // equivalent to:
 //     `go-filecoin miner create --from $TEST_ACCOUNT 100000 20`
 func (td *TestDaemon) CreateMinerAddr(peer *TestDaemon, fromAddr string) address.Address {
-	require := require.New(td.test)
-
 	var wg sync.WaitGroup
 	var minerAddr address.Address
 	wg.Add(1)
 	go func() {
-		miner := td.RunSuccess("miner", "create", "--from", fromAddr, "--price", "0", "--limit", "300", "100", "20")
+		miner := td.RunSuccess("miner", "create", "--from", fromAddr, "--gas-price", "1", "--gas-limit", "300", "100", "20")
 		addr, err := address.NewFromString(strings.Trim(miner.ReadStdout(), "\n"))
-		require.NoError(err)
-		require.NotEqual(addr, address.Address{})
+		require.NoError(td.test, err)
+		require.NotEqual(td.test, addr, address.Undef)
 		minerAddr = addr
 		wg.Done()
 	}()
@@ -486,24 +485,39 @@ func (td *TestDaemon) CreateMinerAddr(peer *TestDaemon, fromAddr string) address
 	return minerAddr
 }
 
-// MinerSetPrice creates an ask for a CURRENTLY MINING test daemon and waits for it to appears on chain
-func (td *TestDaemon) MinerSetPrice(minerAddr string, fromAddr string, price string, expiry string) {
-	td.RunSuccess("miner", "set-price", "--from", fromAddr, "--miner", minerAddr, "--price", "0", "--limit", "300", price, expiry)
+// MinerSetPrice creates an ask for a CURRENTLY MINING test daemon and waits for it to appears on chain. It returns the
+// cid of the AddAsk message so other daemons can `message wait` for it.
+func (td *TestDaemon) MinerSetPrice(minerAddr string, fromAddr string, price string, expiry string) cid.Cid {
+	setPriceReturn := td.RunSuccess("miner", "set-price",
+		"--from", fromAddr,
+		"--miner", minerAddr,
+		"--gas-price", "1",
+		"--gas-limit", "300",
+		"--enc", "json",
+		price, expiry).ReadStdout()
+
+	resultStruct := struct {
+		MinerSetPriceResponse struct {
+			AddAskCid cid.Cid
+		}
+	}{}
+
+	if err := json.Unmarshal([]byte(setPriceReturn), &resultStruct); err != nil {
+		require.NoError(td.test, err)
+	}
+	return resultStruct.MinerSetPriceResponse.AddAskCid
 }
 
 // UpdatePeerID updates a currently mining miner's peer ID
 func (td *TestDaemon) UpdatePeerID() {
-	require := require.New(td.test)
-	assert := assert.New(td.test)
-
 	var idOutput map[string]interface{}
 	peerIDJSON := td.RunSuccess("id").ReadStdout()
 	err := json.Unmarshal([]byte(peerIDJSON), &idOutput)
-	require.NoError(err)
-	updateCidStr := td.RunSuccess("miner", "update-peerid", "--price=0", "--limit=300", td.GetMinerAddress().String(), idOutput["ID"].(string)).ReadStdoutTrimNewlines()
+	require.NoError(td.test, err)
+	updateCidStr := td.RunSuccess("miner", "update-peerid", "--gas-price=1", "--gas-limit=300", td.GetMinerAddress().String(), idOutput["ID"].(string)).ReadStdoutTrimNewlines()
 	updateCid, err := cid.Parse(updateCidStr)
-	require.NoError(err)
-	assert.NotNil(updateCid)
+	require.NoError(td.test, err)
+	assert.NotNil(td.test, updateCid)
 
 	td.WaitForMessageRequireSuccess(updateCid)
 }
@@ -519,13 +533,13 @@ func (td *TestDaemon) WaitForMessageRequireSuccess(msgCid cid.Cid) *types.Messag
 	return rcpt
 }
 
-// CreateWalletAddr adds a new address to the daemons wallet and
+// CreateAddress adds a new address to the daemons wallet and
 // returns it.
 // equivalent to:
-//     `go-filecoin wallet addrs new`
-func (td *TestDaemon) CreateWalletAddr() string {
+//     `go-filecoin address new`
+func (td *TestDaemon) CreateAddress() string {
 	td.test.Helper()
-	outNew := td.RunSuccess("wallet", "addrs", "new")
+	outNew := td.RunSuccess("address", "new")
 	addr := strings.Trim(outNew.ReadStdout(), "\n")
 	require.NotEmpty(td.test, addr)
 	return addr
@@ -626,7 +640,7 @@ func (td *TestDaemon) MakeMoney(rewards int, peers ...*TestDaemon) {
 
 // GetDefaultAddress returns the default sender address for this daemon.
 func (td *TestDaemon) GetDefaultAddress() string {
-	addrs := td.RunSuccess("wallet", "addrs", "ls")
+	addrs := td.RunSuccess("address", "ls")
 	return strings.Split(addrs.ReadStdout(), "\n")[0]
 }
 
@@ -730,6 +744,11 @@ func WithMiner(m string) func(*TestDaemon) {
 	}
 }
 
+// IsRelay starts the daemon with the --is-relay option.
+func IsRelay(td *TestDaemon) {
+	td.isRelay = true
+}
+
 // NewDaemon creates a new `TestDaemon`, using the passed in configuration options.
 func NewDaemon(t *testing.T, options ...func(*TestDaemon)) *TestDaemon {
 	t.Helper()
@@ -756,7 +775,6 @@ func NewDaemon(t *testing.T, options ...func(*TestDaemon)) *TestDaemon {
 	}
 
 	repoDirFlag := fmt.Sprintf("--repodir=%s", td.repoDir)
-	blockTimeFlag := fmt.Sprintf("--block-time=%s", BlockTimeTest)
 
 	// build command options
 	initopts := []string{repoDirFlag}
@@ -801,8 +819,13 @@ func NewDaemon(t *testing.T, options ...func(*TestDaemon)) *TestDaemon {
 
 	swarmListenFlag := fmt.Sprintf("--swarmlisten=%s", td.swarmAddr)
 	cmdAPIAddrFlag := fmt.Sprintf("--cmdapiaddr=%s", td.cmdAddr)
+	blockTimeFlag := fmt.Sprintf("--block-time=%s", BlockTimeTest)
 
 	td.daemonArgs = []string{filecoinBin, "daemon", repoDirFlag, cmdAPIAddrFlag, swarmListenFlag, blockTimeFlag}
+
+	if td.isRelay {
+		td.daemonArgs = append(td.daemonArgs, "--is-relay")
+	}
 
 	return td
 }
@@ -820,7 +843,7 @@ func RunInit(td *TestDaemon, opts ...string) ([]byte, error) {
 
 // GenesisFilePath returns the path of the WalletFile
 func GenesisFilePath() string {
-	return ProjectRoot("/fixtures/genesis.car")
+	return ProjectRoot("/fixtures/test/genesis.car")
 }
 
 // ProjectRoot return the project root joined with any path fragments

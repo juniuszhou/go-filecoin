@@ -1,14 +1,14 @@
 package miner
 
 import (
+	"bytes"
 	"math/big"
-	"os"
 	"strconv"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	xerrors "gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/libp2p/go-libp2p-peer"
+	xerrors "github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
@@ -28,19 +28,23 @@ func init() {
 // MaximumPublicKeySize is a limit on how big a public key can be.
 const MaximumPublicKeySize = 100
 
-// PoStProofLength is the length of a single proof-of-spacetime proof (in bytes).
-const PoStProofLength = 192
-
 // ProvingPeriodBlocks defines how long a proving period is for.
 // TODO: what is an actual workable value? currently set very high to avoid race conditions in test.
 // https://github.com/filecoin-project/go-filecoin/issues/966
-var ProvingPeriodBlocks = types.NewBlockHeight(20000)
+const ProvingPeriodBlocks = 20000
 
 // GracePeriodBlocks is the number of blocks after a proving period over
 // which a miner can still submit a post at a penalty.
 // TODO: what is a secure value for this?  Value is arbitrary right now.
 // See https://github.com/filecoin-project/go-filecoin/issues/1887
-var GracePeriodBlocks = types.NewBlockHeight(100)
+const GracePeriodBlocks = 100
+
+// ClientProofOfStorageTimeoutBlocks is the number of blocks between LastPoSt and the current block height
+// after which the miner is no longer considered to be storing the client's piece and they are entitled to
+// a refund.
+// TODO: what is a fair value for this? Value is arbitrary right now.
+// See https://github.com/filecoin-project/go-filecoin/issues/1887
+const PieceInclusionGracePeriodBlocks = 10000
 
 const (
 	// ErrPublicKeyTooBig indicates an invalid public key.
@@ -61,6 +65,8 @@ const (
 	ErrAskNotFound = 40
 	// ErrInvalidSealProof signals that the passed in seal proof was invalid.
 	ErrInvalidSealProof = 41
+	// ErrGetProofsModeFailed indicates the call to get the proofs mode failed.
+	ErrGetProofsModeFailed = 42
 )
 
 // Errors map error codes to revert errors this actor may return.
@@ -74,6 +80,7 @@ var Errors = map[uint8]error{
 	ErrInvalidPoSt:             errors.NewCodedRevertErrorf(ErrInvalidPoSt, "PoSt proof did not validate"),
 	ErrAskNotFound:             errors.NewCodedRevertErrorf(ErrAskNotFound, "no ask was found"),
 	ErrInvalidSealProof:        errors.NewCodedRevertErrorf(ErrInvalidSealProof, "seal proof was invalid"),
+	ErrGetProofsModeFailed:     errors.NewCodedRevertErrorf(ErrGetProofsModeFailed, "failed to get proofs mode"),
 }
 
 // Actor is the miner actor.
@@ -226,7 +233,11 @@ var minerExports = exec.Exports{
 		Return: []abi.Type{abi.Integer},
 	},
 	"submitPoSt": &exec.FunctionSignature{
-		Params: []abi.Type{abi.Bytes},
+		Params: []abi.Type{abi.PoStProofs},
+		Return: []abi.Type{},
+	},
+	"verifyPieceInclusion": &exec.FunctionSignature{
+		Params: []abi.Type{abi.Bytes, abi.SectorID, abi.Bytes},
 		Return: []abi.Type{},
 	},
 	"getProvingPeriodStart": &exec.FunctionSignature{
@@ -236,6 +247,10 @@ var minerExports = exec.Exports{
 	"getSectorCommitments": &exec.FunctionSignature{
 		Params: nil,
 		Return: []abi.Type{abi.CommitmentsMap},
+	},
+	"isBootstrapMiner": &exec.FunctionSignature{
+		Params: nil,
+		Return: []abi.Type{abi.Boolean},
 	},
 }
 
@@ -247,7 +262,7 @@ func (ma *Actor) Exports() exec.Exports {
 // AddAsk adds an ask to this miners ask list
 func (ma *Actor) AddAsk(ctx exec.VMContext, price *types.AttoFIL, expiry *big.Int) (*big.Int, uint8,
 	error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -297,7 +312,7 @@ func (ma *Actor) AddAsk(ctx exec.VMContext, price *types.AttoFIL, expiry *big.In
 // GetAsks returns all the asks for this miner. (TODO: this isnt a great function signature, it returns the asks in a
 // serialized array. Consider doing this some other way)
 func (ma *Actor) GetAsks(ctx exec.VMContext) ([]uint64, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 	var state State
@@ -326,7 +341,7 @@ func (ma *Actor) GetAsks(ctx exec.VMContext) ([]uint64, uint8, error) {
 
 // GetAsk returns an ask by ID
 func (ma *Actor) GetAsk(ctx exec.VMContext, askid *big.Int) ([]byte, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -365,8 +380,8 @@ func (ma *Actor) GetAsk(ctx exec.VMContext, askid *big.Int) ([]byte, uint8, erro
 
 // GetOwner returns the miners owner.
 func (ma *Actor) GetOwner(ctx exec.VMContext) (address.Address, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
-		return address.Address{}, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
+		return address.Undef, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
 	var state State
@@ -374,12 +389,12 @@ func (ma *Actor) GetOwner(ctx exec.VMContext) (address.Address, uint8, error) {
 		return state.Owner, nil
 	})
 	if err != nil {
-		return address.Address{}, errors.CodeError(err), err
+		return address.Undef, errors.CodeError(err), err
 	}
 
 	a, ok := out.(address.Address)
 	if !ok {
-		return address.Address{}, 1, errors.NewFaultErrorf("expected an Address return value from call, but got %T instead", out)
+		return address.Undef, 1, errors.NewFaultErrorf("expected an Address return value from call, but got %T instead", out)
 	}
 
 	return a, 0, nil
@@ -387,7 +402,7 @@ func (ma *Actor) GetOwner(ctx exec.VMContext) (address.Address, uint8, error) {
 
 // GetLastUsedSectorID returns the last used sector id.
 func (ma *Actor) GetLastUsedSectorID(ctx exec.VMContext) (uint64, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return 0, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 	var state State
@@ -406,9 +421,15 @@ func (ma *Actor) GetLastUsedSectorID(ctx exec.VMContext) (uint64, uint8, error) 
 	return a, 0, nil
 }
 
+// IsBootstrapMiner indicates whether the receiving miner was created in the
+// genesis block, i.e. used to bootstrap the network
+func (ma *Actor) IsBootstrapMiner(ctx exec.VMContext) (bool, uint8, error) {
+	return ma.Bootstrap, 0, nil
+}
+
 // GetSectorCommitments returns all sector commitments posted by this miner.
 func (ma *Actor) GetSectorCommitments(ctx exec.VMContext) (map[string]types.Commitments, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -431,30 +452,41 @@ func (ma *Actor) GetSectorCommitments(ctx exec.VMContext) (map[string]types.Comm
 // CommitSector adds a commitment to the specified sector. The sector must not
 // already be committed.
 func (ma *Actor) CommitSector(ctx exec.VMContext, sectorID uint64, commD, commR, commRStar, proof []byte) (uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
-	if len(commD) != int(proofs.CommitmentBytesLen) {
+	if len(commD) != int(types.CommitmentBytesLen) {
 		return 1, errors.NewRevertError("invalid sized commD")
 	}
-	if len(commR) != int(proofs.CommitmentBytesLen) {
+	if len(commR) != int(types.CommitmentBytesLen) {
 		return 1, errors.NewRevertError("invalid sized commR")
 	}
-	if len(commRStar) != int(proofs.CommitmentBytesLen) {
+	if len(commRStar) != int(types.CommitmentBytesLen) {
 		return 1, errors.NewRevertError("invalid sized commRStar")
 	}
 
+	// As with submitPoSt messages, bootstrap miner actors don't verify
+	// the commitSector messages that they are sent.
+	//
+	// This switching will be removed when issue #2270 is completed.
 	if !ma.Bootstrap {
 		// This unfortunate environment variable-checking needs to happen because
 		// the PoRep verification operation needs to know some things (e.g. size)
 		// about the sector for which the proof was generated in order to verify.
 		//
-		// It is undefined behavior for a miner in "Live" mode to verify a proof
-		// created by a miner in "ProofsTest" mode (and vice-versa).
+		// It is undefined behavior for a miner using "LiveProofsMode" to verify
+		// a proof created by a miner in "TestProofsMode"(and vice-versa).
 		//
-		sectorStoreType := proofs.Live
-		if os.Getenv("FIL_USE_SMALL_SECTORS") == "true" {
-			sectorStoreType = proofs.Test
+		proofsMode, err := GetProofsMode(ctx)
+		if err != nil {
+			return ErrGetProofsModeFailed, Errors[ErrGetProofsModeFailed]
+		}
+
+		var sectorSize types.SectorSize
+		if proofsMode == types.TestProofsMode {
+			sectorSize = types.OneKiBSectorSize
+		} else {
+			sectorSize = types.TwoHundredFiftySixMiBSectorSize
 		}
 
 		req := proofs.VerifySealRequest{}
@@ -464,7 +496,7 @@ func (ma *Actor) CommitSector(ctx exec.VMContext, sectorID uint64, commD, commR,
 		copy(req.Proof[:], proof)
 		req.ProverID = sectorbuilder.AddressToProverID(ctx.Message().To)
 		req.SectorID = sectorbuilder.SectorIDToBytes(sectorID)
-		req.StoreType = sectorStoreType
+		req.SectorSize = sectorSize
 
 		res, err := (&proofs.RustVerifier{}).VerifySeal(req)
 		if err != nil {
@@ -497,9 +529,9 @@ func (ma *Actor) CommitSector(ctx exec.VMContext, sectorID uint64, commD, commR,
 		inc := big.NewInt(1)
 		state.Power = state.Power.Add(state.Power, inc)
 		comms := types.Commitments{
-			CommD:     proofs.CommD{},
-			CommR:     proofs.CommR{},
-			CommRStar: proofs.CommRStar{},
+			CommD:     types.CommD{},
+			CommR:     types.CommR{},
+			CommRStar: types.CommRStar{},
 		}
 		copy(comms.CommD[:], commD)
 		copy(comms.CommR[:], commR)
@@ -522,9 +554,54 @@ func (ma *Actor) CommitSector(ctx exec.VMContext, sectorID uint64, commD, commR,
 	return 0, nil
 }
 
+// VerifyPieceInclusion verifies that proof proves that the data represented by commP is included in the sector.
+// This method returns nothing if the verification succeeds and returns a revert error if verification fails.
+func (ma *Actor) VerifyPieceInclusion(ctx exec.VMContext, commP []byte, sectorID uint64, proof []byte) (uint8, error) {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
+		return exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+	}
+
+	var state State
+	_, err := actor.WithState(ctx, &state, func() (interface{}, error) {
+
+		// If miner has not committed sector id, proof is invalid
+		sectorIDstr := strconv.FormatUint(sectorID, 10)
+		commitment, ok := state.SectorCommitments[sectorIDstr]
+		if !ok {
+			return nil, errors.NewRevertError("sector not committed")
+		}
+
+		// If miner is not up-to-date on their PoSts, proof is invalid
+		if state.LastPoSt == nil {
+			return nil, errors.NewRevertError("proofs out of date")
+		}
+
+		clientProofsTimeout := state.LastPoSt.Add(types.NewBlockHeight(PieceInclusionGracePeriodBlocks))
+		if ctx.BlockHeight().GreaterThan(clientProofsTimeout) {
+			return nil, errors.NewRevertError("proofs out of date")
+		}
+
+		// Verify proof proves CommP is in sector's CommD
+		var typedCommP types.CommP
+		copy(typedCommP[:], commP)
+		valid, err := verifyInclusionProof(typedCommP, commitment.CommD, proof)
+		if err != nil {
+			return nil, err
+		}
+
+		if !valid {
+			return nil, errors.NewRevertError("invalid inclusion proof")
+		}
+
+		return nil, nil
+	})
+
+	return errors.CodeError(err), err
+}
+
 // GetKey returns the public key for this miner.
 func (ma *Actor) GetKey(ctx exec.VMContext) ([]byte, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -546,7 +623,7 @@ func (ma *Actor) GetKey(ctx exec.VMContext) ([]byte, uint8, error) {
 
 // GetPeerID returns the libp2p peer ID that this miner can be reached at.
 func (ma *Actor) GetPeerID(ctx exec.VMContext) (peer.ID, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return peer.ID(""), exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -566,7 +643,7 @@ func (ma *Actor) GetPeerID(ctx exec.VMContext) (peer.ID, uint8, error) {
 
 // UpdatePeerID is used to update the peerID this miner is operating under.
 func (ma *Actor) UpdatePeerID(ctx exec.VMContext, pid peer.ID) (uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -590,7 +667,7 @@ func (ma *Actor) UpdatePeerID(ctx exec.VMContext, pid peer.ID) (uint8, error) {
 
 // GetPledge returns the number of pledged sectors
 func (ma *Actor) GetPledge(ctx exec.VMContext) (*big.Int, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -612,7 +689,7 @@ func (ma *Actor) GetPledge(ctx exec.VMContext) (*big.Int, uint8, error) {
 
 // GetPower returns the amount of proven sectors for this miner.
 func (ma *Actor) GetPower(ctx exec.VMContext) (*big.Int, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -634,13 +711,9 @@ func (ma *Actor) GetPower(ctx exec.VMContext) (*big.Int, uint8, error) {
 
 // SubmitPoSt is used to submit a coalesced PoST to the chain to convince the chain
 // that you have been actually storing the files you claim to be.
-func (ma *Actor) SubmitPoSt(ctx exec.VMContext, proof []byte) (uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+func (ma *Actor) SubmitPoSt(ctx exec.VMContext, postProofs []types.PoStProof) (uint8, error) {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
-	}
-
-	if len(proof) != PoStProofLength {
-		return 0, errors.NewRevertError("invalid sized proof")
 	}
 
 	var state State
@@ -650,53 +723,69 @@ func (ma *Actor) SubmitPoSt(ctx exec.VMContext, proof []byte) (uint8, error) {
 			return nil, Errors[ErrCallerUnauthorized]
 		}
 
-		// reach in to actor storage to grab comm-r for each committed sector
-		var commRs []proofs.CommR
-		for _, v := range state.SectorCommitments {
-			commRs = append(commRs, v.CommR)
-		}
-
-		// copy message-bytes into PoStProof slice
-		postProof := proofs.PoStProof{}
-		copy(postProof[:], proof)
-
-		// See comment above, in CommitSector.
-		//
-		// It is undefined behavior for a miner in "Live" mode to verify a proof
-		// created by a miner in "ProofsTest" mode (and vice-versa).
-		//
-		sectorStoreType := proofs.Live
-		if os.Getenv("FIL_USE_SMALL_SECTORS") == "true" {
-			sectorStoreType = proofs.Test
-		}
-
-		req := proofs.VerifyPoSTRequest{
-			ChallengeSeed: proofs.PoStChallengeSeed{},
-			CommRs:        commRs,
-			Faults:        []uint64{},
-			Proof:         postProof,
-			StoreType:     sectorStoreType,
-		}
-
-		res, err := (&proofs.RustVerifier{}).VerifyPoST(req)
-		if err != nil {
-			return nil, errors.RevertErrorWrap(err, "failed to verify PoSt")
-		}
-		if !res.IsValid {
-			return nil, Errors[ErrInvalidPoSt]
-		}
-
 		// Check if we submitted it in time
-		provingPeriodEnd := state.ProvingPeriodStart.Add(ProvingPeriodBlocks)
-
-		if ctx.BlockHeight().LessEqual(provingPeriodEnd) {
-			state.ProvingPeriodStart = provingPeriodEnd
-			state.LastPoSt = ctx.BlockHeight()
-		} else {
+		provingPeriodEnd := state.ProvingPeriodStart.Add(types.NewBlockHeight(ProvingPeriodBlocks))
+		if ctx.BlockHeight().GreaterThan(provingPeriodEnd) {
 			// Not great.
 			// TODO: charge penalty
 			return nil, errors.NewRevertErrorf("submitted PoSt late, need to pay a fee")
 		}
+
+		// As with commitSector messages, bootstrap miner actors don't verify
+		// the submitPoSt messages that they are sent.
+		//
+		// This switching will be removed when issue #2270 is completed.
+		if !ma.Bootstrap {
+			// See comment above, in CommitSector.
+			//
+			// It is undefined behavior for a miner using "LiveProofsMode" to
+			// verify a proof created by a miner using "TestProofsMode" (and
+			// vice-versa).
+			//
+			proofsMode, err := GetProofsMode(ctx)
+			if err != nil {
+				return ErrGetProofsModeFailed, Errors[ErrGetProofsModeFailed]
+			}
+
+			var sectorSize types.SectorSize
+			if proofsMode == types.TestProofsMode {
+				sectorSize = types.OneKiBSectorSize
+			} else {
+				sectorSize = types.TwoHundredFiftySixMiBSectorSize
+			}
+
+			seed, err := currentProvingPeriodPoStChallengeSeed(ctx, state)
+			if err != nil {
+				return nil, errors.RevertErrorWrap(err, "failed to sample chain for challenge seed")
+			}
+
+			var commRs []types.CommR
+			for _, v := range state.SectorCommitments {
+				commRs = append(commRs, v.CommR)
+			}
+
+			sortedCommRs := proofs.NewSortedCommRs(commRs...)
+
+			req := proofs.VerifyPoSTRequest{
+				ChallengeSeed: seed,
+				SortedCommRs:  sortedCommRs,
+				Faults:        []uint64{},
+				Proofs:        postProofs,
+				SectorSize:    sectorSize,
+			}
+
+			res, err := (&proofs.RustVerifier{}).VerifyPoST(req)
+			if err != nil {
+				return nil, errors.RevertErrorWrap(err, "failed to verify PoSt")
+			}
+			if !res.IsValid {
+				return nil, Errors[ErrInvalidPoSt]
+			}
+		}
+
+		// transition to the next proving period
+		state.ProvingPeriodStart = provingPeriodEnd
+		state.LastPoSt = ctx.BlockHeight()
 
 		return nil, nil
 	})
@@ -709,7 +798,7 @@ func (ma *Actor) SubmitPoSt(ctx exec.VMContext, proof []byte) (uint8, error) {
 
 // GetProvingPeriodStart returns the current ProvingPeriodStart value.
 func (ma *Actor) GetProvingPeriodStart(ctx exec.VMContext) (*types.BlockHeight, uint8, error) {
-	if err := ctx.Charge(100); err != nil {
+	if err := ctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -724,4 +813,42 @@ func (ma *Actor) GetProvingPeriodStart(ctx exec.VMContext) (*types.BlockHeight, 
 	}
 
 	return state.ProvingPeriodStart, 0, nil
+}
+
+func currentProvingPeriodPoStChallengeSeed(ctx exec.VMContext, state State) (types.PoStChallengeSeed, error) {
+	bytes, err := ctx.SampleChainRandomness(state.ProvingPeriodStart)
+	if err != nil {
+		return types.PoStChallengeSeed{}, err
+	}
+
+	seed := types.PoStChallengeSeed{}
+	copy(seed[:], bytes)
+
+	return seed, nil
+}
+
+// GetProofsMode returns the genesis block-configured proofs mode.
+func GetProofsMode(ctx exec.VMContext) (types.ProofsMode, error) {
+	var proofsMode types.ProofsMode
+	msgResult, _, err := ctx.Send(address.StorageMarketAddress, "getProofsMode", types.NewZeroAttoFIL(), nil)
+	if err != nil {
+		return types.TestProofsMode, xerrors.Wrap(err, "'getProofsMode' message failed")
+	}
+	if err := cbor.DecodeInto(msgResult[0], &proofsMode); err != nil {
+		return types.TestProofsMode, xerrors.Wrap(err, "could not unmarshall sector store type")
+	}
+	return proofsMode, nil
+}
+
+// TODO: This is a fake implementation pending availability of the verification algorithm in rust proofs
+// see https://github.com/filecoin-project/go-filecoin/issues/2629
+func verifyInclusionProof(commP types.CommP, commD types.CommD, proof []byte) (bool, error) {
+	if len(proof) != 2*int(types.CommitmentBytesLen) {
+		return false, errors.NewRevertError("malformed inclusion proof")
+	}
+	combined := []byte{}
+	combined = append(combined, commP[:]...)
+	combined = append(combined, commD[:]...)
+
+	return bytes.Equal(combined, proof), nil
 }

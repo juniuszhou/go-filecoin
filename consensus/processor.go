@@ -3,16 +3,24 @@ package consensus
 import (
 	"context"
 	"math/big"
-	"time"
 
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/actor/builtin/account"
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/metrics"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
 	"github.com/filecoin-project/go-filecoin/vm/errors"
 )
+
+var pbTimer *metrics.Float64Timer
+var amTimer *metrics.Float64Timer
+
+func init() {
+	amTimer = metrics.NewTimer("consensus/apply_message", "Duration of message application in milliseconds")
+	pbTimer = metrics.NewTimer("consensus/process_block", "Duration of block processing in milliseconds")
+}
 
 // BlockRewarder applies all rewards due to the miner's owner for processing a block including block reward and gas
 type BlockRewarder interface {
@@ -95,9 +103,10 @@ func NewConfiguredProcessor(validator SignedMessageValidator, rewarder BlockRewa
 func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms vm.StorageMap, blk *types.Block, ancestors []types.TipSet) ([]*ApplicationResult, error) {
 	var emptyResults []*ApplicationResult
 
-	processBlkTimer := time.Now()
+	pbsw := pbTimer.Start(ctx)
 	defer func() {
-		log.Infof("[TIMER] DefaultProcessor.ProcessBlock BlkCID: %s - elapsed time: %s", blk.Cid(), time.Since(processBlkTimer).Round(time.Millisecond))
+		dur := pbsw.Stop(ctx)
+		log.Infof("[TIMER] DefaultProcessor.ProcessBlock BlkCID: %s - elapsed time: %s", blk.Cid(), dur)
 	}()
 
 	// find miner's owner address
@@ -267,9 +276,10 @@ func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms 
 		return nil, errors.FaultErrorWrap(err, "could not get message cid")
 	}
 
-	applyMsgTimer := time.Now()
+	amsw := amTimer.Start(ctx)
 	defer func() {
-		log.Infof("[TIMER] DefaultProcessor.ApplyMessage CID: %s - elapsed time: %s", msgCid.String(), time.Since(applyMsgTimer).Round(time.Millisecond))
+		dur := amsw.Stop(ctx)
+		log.Infof("[TIMER] DefaultProcessor.ApplyMessage CID: %s - elapsed time: %s", msgCid.String(), dur)
 	}()
 
 	cachedStateTree := state.NewCachedStateTree(st)
@@ -328,10 +338,12 @@ var (
 	// used in any other context as they are an implementation detail.
 	errFromAccountNotFound       = errors.NewRevertError("from (sender) account not found")
 	errGasAboveBlockLimit        = errors.NewRevertError("message gas limit above block gas limit")
+	errGasPriceZero              = errors.NewRevertError("message gas price is zero")
 	errGasTooHighForCurrentBlock = errors.NewRevertError("message gas limit too high for current block")
 	errNonceTooHigh              = errors.NewRevertError("nonce too high")
 	errNonceTooLow               = errors.NewRevertError("nonce too low")
 	errNonAccountActor           = errors.NewRevertError("message from non-account actor")
+	errNegativeValue             = errors.NewRevertError("negative value")
 	errInsufficientGas           = errors.NewRevertError("balance insufficient to cover transfer+gas")
 	errInvalidSignature          = errors.NewRevertError("invalid signature by sender over message data")
 	// TODO we'll eventually handle sending to self.
@@ -439,20 +451,20 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 		return nil, errors.FaultErrorWrapf(err, "failed to get From actor %s", msg.From)
 	}
 
-	// processing an external message from an empty actor upgrades it to an account actor.
-	if !fromActor.Code.Defined() {
-		err := account.UpgradeActor(fromActor)
-		if err != nil {
-			return nil, errors.FaultErrorWrap(err, "failed to upgrade empty actor")
-		}
-	}
-
 	err = p.signedMessageValidator.Validate(ctx, msg, fromActor)
 	if err != nil {
 		return &types.MessageReceipt{
 			ExitCode:   errors.CodeError(err),
 			GasAttoFIL: types.ZeroAttoFIL,
 		}, err
+	}
+
+	// Processing an external message from an empty actor upgrades it to an account actor.
+	if fromActor.Empty() {
+		err := account.UpgradeActor(fromActor)
+		if err != nil {
+			return nil, errors.FaultErrorWrap(err, "failed to upgrade empty actor")
+		}
 	}
 
 	toActor, err := st.GetOrCreateActor(ctx, msg.To, func() (*actor.Actor, error) {
@@ -474,7 +486,6 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 		GasTracker:  gasTracker,
 		BlockHeight: bh,
 		Ancestors:   ancestors,
-		LookBack:    LookBackParameter,
 	}
 	vmCtx := vm.NewVMContext(vmCtxParams)
 
@@ -622,22 +633,19 @@ func isPermanentError(err error) bool {
 		err == errInvalidSignature ||
 		err == errNonceTooLow ||
 		err == errNonAccountActor ||
+		err == errNegativeValue ||
 		err == errors.Errors[errors.ErrCannotTransferNegativeValue] ||
 		err == errGasAboveBlockLimit
 }
 
 // minerOwnerAddress finds the address of the owner of the given miner
 func minerOwnerAddress(ctx context.Context, st state.Tree, vms vm.StorageMap, minerAddr address.Address) (address.Address, error) {
-	ret, code, err := CallQueryMethod(ctx, st, vms, minerAddr, "getOwner", []byte{}, address.Address{}, types.NewBlockHeight(0))
+	ret, code, err := CallQueryMethod(ctx, st, vms, minerAddr, "getOwner", []byte{}, address.Undef, types.NewBlockHeight(0))
 	if err != nil {
-		return address.Address{}, errors.FaultErrorWrap(err, "could not get miner owner")
+		return address.Undef, errors.FaultErrorWrap(err, "could not get miner owner")
 	}
 	if code != 0 {
-		return address.Address{}, errors.NewFaultErrorf("could not get miner owner. error code %d", code)
+		return address.Undef, errors.NewFaultErrorf("could not get miner owner. error code %d", code)
 	}
-	minerOwnerAddr, err := address.NewFromBytes(ret[0])
-	if err != nil {
-		return address.Address{}, errors.FaultErrorWrap(err, "miner owner return value could not be decoded as address")
-	}
-	return minerOwnerAddr, nil
+	return address.NewFromBytes(ret[0])
 }

@@ -4,18 +4,17 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"os"
 	"testing"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
-	pstore "gx/ipfs/QmRhFARzTHcFh8wUxwN5KvyTGq73FLC65EfFAhz8Ng7aGb/go-libp2p-peerstore"
-	"gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	"gx/ipfs/QmSz8kAe2JCKp2dWSG8gHSWnwSmne8YfRXTeK5HBmc9L7t/go-ipfs-exchange-offline"
-	"gx/ipfs/QmTW4SdgBWq9GjsBsHeUx8WuGxzhgzAf88UMH2w62PC8yK/go-libp2p-crypto"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	ds "gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
-	bserv "gx/ipfs/QmZsGVGCqMCNzHLNMB6q4F6yyvomqf1VxwhJwSfgo1NGaF/go-blockservice"
+	bserv "github.com/ipfs/go-blockservice"
+	ds "github.com/ipfs/go-datastore"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	"github.com/ipfs/go-ipfs-exchange-offline"
+	"github.com/libp2p/go-libp2p-crypto"
+	"github.com/libp2p/go-libp2p-peer"
+	pstore "github.com/libp2p/go-libp2p-peerstore"
+	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
@@ -48,7 +47,6 @@ type TestNodeOptions struct {
 func MakeChainSeed(t *testing.T, cfg *gengen.GenesisCfg) *ChainSeed {
 	t.Helper()
 
-	// TODO: these six lines are ugly. We can do better...
 	mds := ds.NewMapDatastore()
 	bstore := blockstore.NewBlockstore(mds)
 	offl := offline.Exchange(bstore)
@@ -156,18 +154,17 @@ func ConnectNodes(t *testing.T, a, b *Node) {
 	}
 }
 
-// MakeNodesUnstartedWithGif creates a new (unstarted) nodes with an
-// InMemoryRepo initialized with the given genesis init function, applies
-// options from the InMemory Repo and returns a slice of the initialized nodes.
-func MakeNodesUnstartedWithGif(t *testing.T, numNodes int, offlineMode bool, gif consensus.GenesisInitFunc, options []ConfigOpt) []*Node {
-	var out []*Node
-
+// MakeNodesUnstartedWithGif creates some new nodes with an InMemoryRepo and fake proof verifier.
+// The repo is initialized with a supplied genesis init function.
+// Call StartNodes to start them.
+func MakeNodesUnstartedWithGif(t *testing.T, numNodes int, offlineMode bool, gif consensus.GenesisInitFunc) []*Node {
 	tno := TestNodeOptions{
 		OfflineMode: offlineMode,
 		GenesisFunc: gif,
-		ConfigOpts:  options,
+		ConfigOpts:  DefaultTestingConfig(),
 	}
 
+	var out []*Node
 	for i := 0; i < numNodes; i++ {
 		nd := GenNode(t, &tno)
 		out = append(out, nd)
@@ -176,54 +173,48 @@ func MakeNodesUnstartedWithGif(t *testing.T, numNodes int, offlineMode bool, gif
 	return out
 }
 
-// MakeNodesUnstarted creates n new (unstarted) nodes with an InMemoryRepo,
-// applies options from the InMemoryRepo and returns a slice of the initialized
-// nodes
-func MakeNodesUnstarted(t *testing.T, numNodes int, offlineMode bool, mockMineMode bool) []*Node {
-	var configOpts []ConfigOpt
-
-	if mockMineMode {
-		configOpts = configureFakeVerifier(configOpts)
-	}
-
-	return MakeNodesUnstartedWithGif(t, numNodes, offlineMode, consensus.InitGenesis, configOpts)
+// MakeNodesUnstarted creates some new nodes with an InMemoryRepo, fake proof verifier, and default genesis block.
+// Call StartNodes to start them.
+func MakeNodesUnstarted(t *testing.T, numNodes int, offlineMode bool) []*Node {
+	return MakeNodesUnstartedWithGif(t, numNodes, offlineMode, consensus.DefaultGenesis)
 }
 
-// MakeNodesStarted creates n new (started) nodes with an InMemoryRepo,
-// applies options from the InMemoryRepo and returns a slice of the nodes
-func MakeNodesStarted(t *testing.T, numNodes int, offlineMode, mockMineMode bool) []*Node {
-	var nds []*Node
-
-	var configOpts []ConfigOpt
-	if mockMineMode {
-		configOpts = configureFakeVerifier(configOpts)
-	}
-
-	nds = MakeNodesUnstartedWithGif(t, numNodes, offlineMode, consensus.InitGenesis, configOpts)
-	for _, n := range nds {
-		require.NoError(t, n.Start(context.Background()))
-	}
-	return nds
-}
-
-// MakeOfflineNode returns a single unstarted offline node with mocked mining.
+// MakeOfflineNode returns a single unstarted offline node.
 func MakeOfflineNode(t *testing.T) *Node {
 	return MakeNodesUnstartedWithGif(t,
 		1,    /* 1 node */
 		true, /* offline */
-		consensus.InitGenesis,
-		nil /* default config */)[0]
+		consensus.DefaultGenesis)[0]
+}
+
+// DefaultTestingConfig returns default configuration for testing
+func DefaultTestingConfig() []ConfigOpt {
+	return []ConfigOpt{
+		VerifierConfigOption(proofs.NewFakeVerifier(true, nil)),
+	}
+}
+
+// StartNodes starts some nodes, failing on any error.
+func StartNodes(t *testing.T, nds []*Node) {
+	t.Helper()
+	for _, nd := range nds {
+		if err := nd.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// StopNodes initiates shutdown of some nodes.
+func StopNodes(nds []*Node) {
+	for _, nd := range nds {
+		nd.Stop(context.Background())
+	}
 }
 
 // MustCreateMinerResult contains the result of a CreateMiner command
 type MustCreateMinerResult struct {
 	MinerAddress *address.Address
 	Err          error
-}
-
-func configureFakeVerifier(cfo []ConfigOpt) []ConfigOpt {
-	verifier := proofs.NewFakeVerifier(true, nil)
-	return append(cfo, VerifierConfigOption(verifier))
 }
 
 // PeerKeys are a list of keys for peers that can be used in testing.
@@ -257,13 +248,10 @@ func GenNode(t *testing.T, tno *TestNodeOptions) *Node {
 	}
 	// set a random port here so things don't break in the event we make
 	// a parallel request
-	// TODO: can we use port 0 yet?
 	port, err := testhelpers.GetFreePort()
 	require.NoError(t, err)
 	r.Config().API.Address = fmt.Sprintf(":%d", port)
 
-	// This needs to preserved to keep the test runtime (and corresponding timeouts) sane
-	err = os.Setenv("FIL_USE_SMALL_SECTORS", "true")
 	require.NoError(t, err)
 
 	if tno.GenesisFunc != nil {

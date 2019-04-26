@@ -12,16 +12,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ipfs/go-cid"
+	logging "github.com/ipfs/go-log"
+	"github.com/multiformats/go-multiaddr"
+	"github.com/pkg/errors"
+
 	"github.com/filecoin-project/go-filecoin/config"
 
-	"gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
-
-	"github.com/filecoin-project/go-filecoin/tools/iptb-plugins/filecoin"
 	"github.com/ipfs/iptb/testbed/interfaces"
 	"github.com/ipfs/iptb/util"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/filecoin-project/go-filecoin/tools/iptb-plugins/filecoin"
 )
 
 // PluginName is the name of the plugin
@@ -39,9 +41,6 @@ var DefaultFilecoinBinary = "go-filecoin"
 // DefaultLogLevel is the value that will be used for GO_FILECOIN_LOG_LEVEL
 var DefaultLogLevel = "3"
 
-// DefaultUseSmallSectors is the value that will be used for FIL_USE_SMALL_SECTORS
-var DefaultUseSmallSectors = "false"
-
 // DefaultLogJSON is the value that will be used for GO_FILECOIN_LOG_JSON
 var DefaultLogJSON = "false"
 
@@ -54,9 +53,6 @@ var (
 
 	// AttrLogJSON is the key used to set the node to output json logs
 	AttrLogJSON = "logJSON"
-
-	// AttrUseSmallSectors is the key used to set the node to use small sectors through NewNode attrs
-	AttrUseSmallSectors = "useSmallSectors"
 )
 
 // Localfilecoin represents a filecoin node
@@ -65,10 +61,9 @@ type Localfilecoin struct {
 	peerid  cid.Cid
 	apiaddr multiaddr.Multiaddr
 
-	binPath         string
-	logLevel        string
-	logJSON         string
-	useSmallSectors string
+	binPath  string
+	logLevel string
+	logJSON  string
 }
 
 var NewNode testbedi.NewNodeFunc // nolint: golint
@@ -78,10 +73,9 @@ func init() {
 		var (
 			err error
 
-			binPath         = ""
-			logLevel        = DefaultLogLevel
-			logJSON         = DefaultLogJSON
-			useSmallSectors = DefaultUseSmallSectors
+			binPath  = ""
+			logLevel = DefaultLogLevel
+			logJSON  = DefaultLogJSON
 		)
 
 		if v, ok := attrs[AttrFilecoinBinary]; ok {
@@ -90,10 +84,6 @@ func init() {
 
 		if v, ok := attrs[AttrLogLevel]; ok {
 			logLevel = v
-		}
-
-		if v, ok := attrs[AttrUseSmallSectors]; ok {
-			useSmallSectors = v
 		}
 
 		if v, ok := attrs[AttrLogJSON]; ok {
@@ -106,12 +96,24 @@ func init() {
 			}
 		}
 
+		if err := os.Mkdir(filepath.Join(dir, "bin"), 0755); err != nil {
+			return nil, fmt.Errorf("could not make dir: %s", err)
+		}
+
+		dst := filepath.Join(dir, "bin", filepath.Base(binPath))
+		if err := copyFileContents(binPath, dst); err != nil {
+			return nil, err
+		}
+
+		if err := os.Chmod(dst, 0755); err != nil {
+			return nil, err
+		}
+
 		return &Localfilecoin{
-			dir:             dir,
-			binPath:         binPath,
-			logLevel:        logLevel,
-			logJSON:         logJSON,
-			useSmallSectors: useSmallSectors,
+			dir:      dir,
+			binPath:  dst,
+			logLevel: logLevel,
+			logJSON:  logJSON,
 		}, nil
 	}
 }
@@ -126,7 +128,7 @@ func (l *Localfilecoin) Init(ctx context.Context, args ...string) (testbedi.Outp
 		return nil, oerr
 	}
 
-	icfg, err := l.GetConfig()
+	icfg, err := l.Config()
 	if err != nil {
 		return nil, err
 	}
@@ -291,13 +293,24 @@ func (l *Localfilecoin) RunCmd(ctx context.Context, stdin io.Reader, args ...str
 		return nil, err
 	}
 
-	stderrbytes, err := ioutil.ReadAll(stderr)
-	if err != nil {
-		return nil, err
-	}
+	g, ctx := errgroup.WithContext(ctx)
 
-	stdoutbytes, err := ioutil.ReadAll(stdout)
-	if err != nil {
+	var stderrbytes []byte
+	var stdoutbytes []byte
+
+	g.Go(func() error {
+		var err error
+		stderrbytes, err = ioutil.ReadAll(stderr)
+		return err
+	})
+
+	g.Go(func() error {
+		var err error
+		stdoutbytes, err = ioutil.ReadAll(stdout)
+		return err
+	})
+
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
 
@@ -351,7 +364,7 @@ func (l *Localfilecoin) Shell(ctx context.Context, ns []testbedi.Core) error {
 	}
 
 	if len(os.Getenv("FIL_PATH")) != 0 {
-		// If the users shell sets IPFS_PATH, it will just be overridden by the shell again
+		// If the users shell sets FIL_PATH, it will just be overridden by the shell again
 		return fmt.Errorf("shell has FIL_PATH set, please unset before trying to use iptb shell")
 	}
 
@@ -374,7 +387,25 @@ func (l *Localfilecoin) Shell(ctx context.Context, ns []testbedi.Core) error {
 		nenvs = append(nenvs, fmt.Sprintf("NODE%d=%s", i, peerid))
 	}
 
-	return syscall.Exec(shell, []string{shell}, nenvs)
+	pid, err := l.getPID()
+	if err != nil {
+		return err
+	}
+
+	nenvs = filecoin.UpdateOrAppendEnv(nenvs, "FIL_PID", fmt.Sprintf("%d", pid))
+	nenvs = filecoin.UpdateOrAppendEnv(nenvs, "FIL_BINARY", l.binPath)
+
+	cmd := exec.CommandContext(ctx, shell)
+	cmd.Env = nenvs
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	return cmd.Wait()
 }
 
 // Infof writes an info log.
@@ -457,7 +488,7 @@ func (l *Localfilecoin) SwarmAddrs() ([]string, error) {
 /** Config Interface **/
 
 // GetConfig returns the nodes config.
-func (l *Localfilecoin) GetConfig() (interface{}, error) {
+func (l *Localfilecoin) Config() (interface{}, error) {
 	return config.ReadFile(filepath.Join(l.dir, "config.json"))
 }
 

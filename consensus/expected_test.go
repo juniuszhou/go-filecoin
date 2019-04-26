@@ -12,34 +12,35 @@ import (
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/testhelpers"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
-	"gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	"gx/ipfs/QmSz8kAe2JCKp2dWSG8gHSWnwSmne8YfRXTeK5HBmc9L7t/go-ipfs-exchange-offline"
-	"gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmZsGVGCqMCNzHLNMB6q4F6yyvomqf1VxwhJwSfgo1NGaF/go-blockservice"
-	"gx/ipfs/QmcTzQXRcU2vf8yX5EEboz1BSvWC7wWmeYAKVQmhp8WZYU/sha256-simd"
+	"github.com/ipfs/go-blockservice"
+	"github.com/ipfs/go-datastore"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	"github.com/ipfs/go-ipfs-exchange-offline"
+	"github.com/minio/sha256-simd"
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewExpected(t *testing.T) {
-	assert := assert.New(t)
+	tf.UnitTest(t)
+
 	t.Run("a new Expected can be created", func(t *testing.T) {
 		cst, bstore, verifier := setupCborBlockstoreProofs()
 		ptv := testhelpers.NewTestPowerTableView(1, 5)
 		exp := consensus.NewExpected(cst, bstore, consensus.NewDefaultProcessor(), ptv, types.SomeCid(), verifier)
-		assert.NotNil(exp)
+		assert.NotNil(t, exp)
 	})
 }
 
 // TestExpected_NewValidTipSet also tests validateBlockStructure.
 func TestExpected_NewValidTipSet(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
 
 	ctx := context.Background()
 	cistore, bstore, verifier := setupCborBlockstoreProofs()
@@ -47,24 +48,24 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 
 	t.Run("NewValidTipSet returns a tipset + nil (no errors) when valid blocks", func(t *testing.T) {
 
-		genesisBlock, err := consensus.InitGenesis(cistore, bstore)
-		require.NoError(err)
+		genesisBlock, err := consensus.DefaultGenesis(cistore, bstore)
+		require.NoError(t, err)
 
 		exp := consensus.NewExpected(cistore, bstore, consensus.NewDefaultProcessor(), ptv, genesisBlock.Cid(), verifier)
 
 		pTipSet, err := exp.NewValidTipSet(ctx, []*types.Block{genesisBlock})
-		require.NoError(err)
+		require.NoError(t, err)
 
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot, builtin.Actors)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		vms := vm.NewStorageMap(bstore)
 
-		blocks := makeSomeBlocks(ctx, require, pTipSet, stateTree, vms)
+		blocks := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
-		assert.NoError(err)
-		assert.NotNil(tipSet)
+		assert.NoError(t, err)
+		assert.NotNil(t, tipSet)
 	})
 
 	t.Run("NewValidTipSet returns nil + error when invalid blocks", func(t *testing.T) {
@@ -88,28 +89,43 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 		exp := consensus.NewExpected(cistore, bstore, consensus.NewDefaultProcessor(), ptv, types.SomeCid(), verifier)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
-		assert.Error(err, "Foo")
-		assert.Nil(tipSet)
+		assert.Error(t, err, "Foo")
+		assert.Nil(t, tipSet)
 	})
 }
 
-func makeSomeBlocks(ctx context.Context, require *require.Assertions, pTipSet types.TipSet, tree state.Tree, vms vm.StorageMap) []*types.Block {
-	addrNames := []string{"foo", "bar", "bazz"}
-	addrs := make([]address.Address, len(addrNames))
+// requireMakeBlocks sets up 3 blocks with 3 owner actors and 3 miner actors and puts them in the state tree.
+// the owner actors have associated mockSigners for signing blocks (not implemented yet) and tickets.
+func requireMakeBlocks(ctx context.Context, t *testing.T, pTipSet types.TipSet, tree state.Tree, vms vm.StorageMap) []*types.Block {
+	// make  a set of owner keypairs so they can sign blocks
+	mockSigner, kis := types.NewMockSignersAndKeyInfo(3)
 
-	for i, name := range addrNames {
-		addrs[i] = address.MakeTestAddress(name)
-		owner := address.MakeTestAddress(fmt.Sprintf("%s%s", name, "Owner"))
-		miner := testhelpers.RequireNewMinerActor(require, vms, addrs[i], owner, []byte{}, 10000, testhelpers.RequireRandomPeerID(), types.NewZeroAttoFIL())
-		tree.SetActor(ctx, addrs[i], miner)
+	// iterate over the keypairs and set up owner actors and miner actors with their own addresses
+	// and add them to the state tree
+	ownerPubKeys := make([][]byte, 3)
+	minerAddrs := make([]address.Address, 3)
+	for i, name := range kis {
+		addr, err := kis[i].Address()
+		require.NoError(t, err)
+
+		ownerPubKeys[i] = kis[i].PublicKey()
+
+		ownerActor := testhelpers.RequireNewAccountActor(t, types.NewZeroAttoFIL())
+		require.NoError(t, tree.SetActor(ctx, addr, ownerActor))
+
+		minerAddrs[i], err = address.NewActorAddress([]byte(fmt.Sprintf("%s%s", name, "Miner")))
+		require.NoError(t, err)
+		minerActor := testhelpers.RequireNewMinerActor(t, vms, minerAddrs[i], addr,
+			ownerPubKeys[i], 10000, testhelpers.RequireRandomPeerID(t), types.NewZeroAttoFIL())
+		require.NoError(t, tree.SetActor(ctx, minerAddrs[i], minerActor))
 	}
 	stateRoot, err := tree.Flush(ctx)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	blocks := []*types.Block{
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, stateRoot, 1, addrs[0]),
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, stateRoot, 1, addrs[1]),
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, stateRoot, 1, addrs[2]),
+		testhelpers.NewValidTestBlockFromTipSet(pTipSet, stateRoot, 1, minerAddrs[0], ownerPubKeys[0], mockSigner),
+		testhelpers.NewValidTestBlockFromTipSet(pTipSet, stateRoot, 1, minerAddrs[1], ownerPubKeys[1], mockSigner),
+		testhelpers.NewValidTestBlockFromTipSet(pTipSet, stateRoot, 1, minerAddrs[2], ownerPubKeys[2], mockSigner),
 	}
 	return blocks
 }
@@ -119,13 +135,13 @@ func makeSomeBlocks(ctx context.Context, require *require.Assertions, pTipSet ty
 // completely set up a valid state tree with a valid matching TipSet.  RunStateTransition is tested
 // with integration tests (see chain_daemon_test.go for example)
 func TestExpected_RunStateTransition_validateMining(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
+
 	ctx := context.Background()
 
 	cistore, bstore, verifier := setupCborBlockstoreProofs()
-	genesisBlock, err := consensus.InitGenesis(cistore, bstore)
-	require.NoError(err)
+	genesisBlock, err := consensus.DefaultGenesis(cistore, bstore)
+	require.NoError(t, err)
 
 	t.Run("passes the validateMining section when given valid mining blocks", func(t *testing.T) {
 
@@ -136,20 +152,19 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		exp := consensus.NewExpected(cistore, bstore, testhelpers.NewTestProcessor(), ptv, genesisBlock.Cid(), verifier)
 
 		pTipSet, err := exp.NewValidTipSet(ctx, []*types.Block{genesisBlock})
-		require.NoError(err)
+		require.NoError(t, err)
 
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot, builtin.Actors)
-		require.NoError(err)
-
+		require.NoError(t, err)
 		vms := vm.NewStorageMap(bstore)
 
-		blocks := makeSomeBlocks(ctx, require, pTipSet, stateTree, vms)
+		blocks := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		_, err = exp.RunStateTransition(ctx, tipSet, []types.TipSet{pTipSet}, stateTree)
-		assert.NoError(err)
+		assert.NoError(t, err)
 	})
 
 	t.Run("returns nil + mining error when IsWinningTicket fails due to miner power error", func(t *testing.T) {
@@ -158,26 +173,33 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		exp := consensus.NewExpected(cistore, bstore, consensus.NewDefaultProcessor(), ptv, types.SomeCid(), verifier)
 
 		pTipSet, err := exp.NewValidTipSet(ctx, []*types.Block{genesisBlock})
-		require.NoError(err)
+		require.NoError(t, err)
 
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot, builtin.Actors)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		vms := vm.NewStorageMap(bstore)
 
-		blocks := makeSomeBlocks(ctx, require, pTipSet, stateTree, vms)
+		blocks := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		_, err = exp.RunStateTransition(ctx, tipSet, []types.TipSet{pTipSet}, stateTree)
-		assert.EqualError(err, "can't check for winning ticket: Couldn't get minerPower: something went wrong with the miner power")
+		assert.EqualError(t, err, "can't check for winning ticket: Couldn't get minerPower: something went wrong with the miner power")
 	})
 }
 
 func TestIsWinningTicket(t *testing.T) {
-	assert := assert.New(t)
+	tf.UnitTest(t)
 
+	minerAddress := address.NewForTestGetter()()
+	ctx := context.Background()
+	d := datastore.NewMapDatastore()
+	bs := blockstore.NewBlockstore(d)
+	var st state.Tree
+
+	// Just do a sanity check here and do the rest of the checks by tesing CompareTicketPower directly.
 	t.Run("IsWinningTicket returns expected boolean + nil in non-error case", func(t *testing.T) {
 		cases := []struct {
 			ticket     byte
@@ -186,17 +208,7 @@ func TestIsWinningTicket(t *testing.T) {
 			wins       bool
 		}{
 			{0x00, 1, 5, true},
-			{0x30, 1, 5, true},
-			{0x40, 1, 5, false},
-			{0xF0, 1, 5, false},
-			{0x00, 5, 5, true},
-			{0x33, 5, 5, true},
-			{0x44, 5, 5, true},
-			{0xFF, 5, 5, true},
-			{0x00, 0, 5, false},
-			{0x33, 0, 5, false},
-			{0x44, 0, 5, false},
-			{0xFF, 0, 5, false},
+			{0xF0, 0, 5, false},
 		}
 
 		minerAddress := address.NewForTestGetter()()
@@ -207,11 +219,11 @@ func TestIsWinningTicket(t *testing.T) {
 
 		for _, c := range cases {
 			ptv := testhelpers.NewTestPowerTableView(c.myPower, c.totalPower)
-			ticket := [sha256.Size]byte{}
+			ticket := [65]byte{}
 			ticket[0] = c.ticket
 			r, err := consensus.IsWinningTicket(ctx, bs, ptv, st, ticket[:], minerAddress)
-			assert.NoError(err)
-			assert.Equal(c.wins, r, "%+v", c)
+			assert.NoError(t, err)
+			assert.Equal(t, c.wins, r, "%+v", c)
 		}
 	})
 
@@ -222,19 +234,13 @@ func TestIsWinningTicket(t *testing.T) {
 		wins       bool
 	}{0x00, 1, 5, true}
 
-	minerAddress := address.NewForTestGetter()()
-	ctx := context.Background()
-	d := datastore.NewMapDatastore()
-	bs := blockstore.NewBlockstore(d)
-	var st state.Tree
-
 	t.Run("IsWinningTicket returns false + error when we fail to get total power", func(t *testing.T) {
 		ptv1 := NewFailingTestPowerTableView(testCase.myPower, testCase.totalPower)
-		ticket := [sha256.Size]byte{}
+		ticket := [65]byte{}
 		ticket[0] = testCase.ticket
 		r, err := consensus.IsWinningTicket(ctx, bs, ptv1, st, ticket[:], minerAddress)
-		assert.False(r)
-		assert.Equal(err.Error(), "Couldn't get totalPower: something went wrong with the total power")
+		assert.False(t, r)
+		assert.Equal(t, err.Error(), "Couldn't get totalPower: something went wrong with the total power")
 
 	})
 
@@ -243,14 +249,44 @@ func TestIsWinningTicket(t *testing.T) {
 		ticket := [sha256.Size]byte{}
 		ticket[0] = testCase.ticket
 		r, err := consensus.IsWinningTicket(ctx, bs, ptv2, st, ticket[:], minerAddress)
-		assert.False(r)
-		assert.Equal(err.Error(), "Couldn't get minerPower: something went wrong with the miner power")
+		assert.False(t, r)
+		assert.Equal(t, err.Error(), "Couldn't get minerPower: something went wrong with the miner power")
 
 	})
 }
 
+func TestCompareTicketPower(t *testing.T) {
+	tf.UnitTest(t)
+
+	cases := []struct {
+		ticket     byte
+		myPower    uint64
+		totalPower uint64
+		wins       bool
+	}{
+		{0x00, 1, 5, true},
+		{0x30, 1, 5, true},
+		{0x40, 1, 5, false},
+		{0xF0, 1, 5, false},
+		{0x00, 5, 5, true},
+		{0x33, 5, 5, true},
+		{0x44, 5, 5, true},
+		{0xFF, 5, 5, true},
+		{0x00, 0, 5, false},
+		{0x33, 0, 5, false},
+		{0x44, 0, 5, false},
+		{0xFF, 0, 5, false},
+	}
+	for _, c := range cases {
+		ticket := [65]byte{}
+		ticket[0] = c.ticket
+		res := consensus.CompareTicketPower(ticket[:], c.myPower, c.totalPower)
+		assert.Equal(t, c.wins, res, "%+v", c)
+	}
+}
+
 func TestCreateChallenge(t *testing.T) {
-	assert := assert.New(t)
+	tf.UnitTest(t)
 
 	cases := []struct {
 		parentTickets  [][]byte
@@ -273,16 +309,17 @@ func TestCreateChallenge(t *testing.T) {
 
 	for _, c := range cases {
 		decoded, err := hex.DecodeString(c.challenge)
-		assert.NoError(err)
+		assert.NoError(t, err)
 
 		parents := types.TipSet{}
-		for _, t := range c.parentTickets {
-			b := types.Block{Ticket: t}
-			parents.AddBlock(&b)
+		for _, ticket := range c.parentTickets {
+			b := types.Block{Ticket: ticket}
+			err = parents.AddBlock(&b)
+			assert.NoError(t, err)
 		}
 		r, err := consensus.CreateChallengeSeed(parents, c.nullBlockCount)
-		assert.NoError(err)
-		assert.Equal(decoded, r[:])
+		assert.NoError(t, err)
+		assert.Equal(t, decoded, r[:])
 	}
 }
 
@@ -307,7 +344,7 @@ func (tv *FailingTestPowerTableView) Total(ctx context.Context, st state.Tree, b
 }
 
 func (tv *FailingTestPowerTableView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (uint64, error) {
-	return uint64(tv.minerPower), nil
+	return tv.minerPower, nil
 }
 
 func (tv *FailingTestPowerTableView) HasPower(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) bool {

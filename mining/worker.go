@@ -8,15 +8,14 @@ import (
 	"context"
 	"time"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	logging "github.com/ipfs/go-log"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
@@ -75,11 +74,11 @@ type MessageApplier interface {
 
 // DefaultWorker runs a mining job.
 type DefaultWorker struct {
-	createPoSTFunc  DoSomeWorkFunc
-	minerAddr       address.Address
-	minerOwnerAddr  address.Address
-	blockSignerAddr address.Address
-	blockSigner     types.Signer
+	createPoSTFunc DoSomeWorkFunc
+	minerAddr      address.Address
+	minerOwnerAddr address.Address
+	minerPubKey    []byte
+	workerSigner   consensus.TicketSigner
 
 	// consensus things
 	getStateTree GetStateTree
@@ -106,8 +105,8 @@ func NewDefaultWorker(messageSource MessageSource,
 	cst *hamt.CborIpldStore,
 	miner address.Address,
 	minerOwner address.Address,
-	blockSignerAddr address.Address,
-	blockSigner types.Signer,
+	minerPubKey []byte,
+	workerSigner consensus.TicketSigner,
 	bt time.Duration) *DefaultWorker {
 
 	w := NewDefaultWorkerWithDeps(messageSource,
@@ -120,8 +119,8 @@ func NewDefaultWorker(messageSource MessageSource,
 		cst,
 		miner,
 		minerOwner,
-		blockSignerAddr,
-		blockSigner,
+		minerPubKey,
+		workerSigner,
 		bt,
 		func() {})
 
@@ -143,25 +142,25 @@ func NewDefaultWorkerWithDeps(messageSource MessageSource,
 	cst *hamt.CborIpldStore,
 	miner address.Address,
 	minerOwner address.Address,
-	blockSignerAddr address.Address,
-	blockSigner types.Signer,
+	minerPubKey []byte,
+	workerSigner consensus.TicketSigner,
 	bt time.Duration,
 	createPoST DoSomeWorkFunc) *DefaultWorker {
 	return &DefaultWorker{
-		getStateTree:    getStateTree,
-		getWeight:       getWeight,
-		getAncestors:    getAncestors,
-		messageSource:   messageSource,
-		processor:       processor,
-		powerTable:      powerTable,
-		blockstore:      bs,
-		cstore:          cst,
-		createPoSTFunc:  createPoST,
-		minerAddr:       miner,
-		minerOwnerAddr:  minerOwner,
-		blockTime:       bt,
-		blockSignerAddr: blockSignerAddr,
-		blockSigner:     blockSigner,
+		getStateTree:   getStateTree,
+		getWeight:      getWeight,
+		getAncestors:   getAncestors,
+		messageSource:  messageSource,
+		processor:      processor,
+		powerTable:     powerTable,
+		blockstore:     bs,
+		cstore:         cst,
+		createPoSTFunc: createPoST,
+		minerAddr:      miner,
+		minerOwnerAddr: minerOwner,
+		minerPubKey:    minerPubKey,
+		blockTime:      bt,
+		workerSigner:   workerSigner,
 	}
 }
 
@@ -202,7 +201,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 	}
 	prCh := createProof(challenge, w.createPoSTFunc)
 
-	var proof proofs.PoStProof
+	var proof types.PoStProof
 	var ticket []byte
 	select {
 	case <-ctx.Done():
@@ -214,7 +213,11 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 			return false
 		}
 		copy(proof[:], prChRead[:])
-		ticket = consensus.CreateTicket(proof, w.minerAddr)
+		ticket, err = consensus.CreateTicket(proof, w.minerPubKey, w.workerSigner)
+		if err != nil {
+			log.Errorf("failed to create ticket: %s", err)
+			return false
+		}
 	}
 
 	// TODO: Test the interplay of isWinningTicket() and createPoSTFunc()
@@ -242,8 +245,8 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 
 // TODO: Actually use the results of the PoST once it is implemented.
 // Currently createProof just passes the challenge seed through.
-func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFunc) <-chan proofs.PoStChallengeSeed {
-	c := make(chan proofs.PoStChallengeSeed)
+func createProof(challengeSeed types.PoStChallengeSeed, createPoST DoSomeWorkFunc) <-chan types.PoStChallengeSeed {
+	c := make(chan types.PoStChallengeSeed)
 	go func() {
 		// TODO send new PoST on channel once we can create it
 		//  https://github.com/filecoin-project/go-filecoin/issues/1791

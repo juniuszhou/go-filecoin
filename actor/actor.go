@@ -3,9 +3,9 @@ package actor
 
 import (
 	"fmt"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -13,6 +13,9 @@ import (
 func init() {
 	cbor.RegisterCborType(Actor{})
 }
+
+// DefaultGasCost is default gas cost for the actor calls.
+const DefaultGasCost = 100
 
 // Actor is the central abstraction of entities in the system.
 //
@@ -31,7 +34,8 @@ func init() {
 //
 // Not safe for concurrent access.
 type Actor struct {
-	// Code is a CID of the VM code for this actor's implementation (or a constant for actors implemented in Go code)
+	// Code is a CID of the VM code for this actor's implementation (or a constant for actors implemented in Go code).
+	// Code may be nil for an uninitialized actor (which exists because it has received a balance).
 	Code cid.Cid `refmt:",omitempty"`
 	// Head is the CID of the root of the actor's state tree.
 	Head cid.Cid `refmt:",omitempty"`
@@ -40,6 +44,21 @@ type Actor struct {
 	Nonce types.Uint64
 	// Balance is the amount of FIL in the actor's account.
 	Balance *types.AttoFIL
+}
+
+// NewActor constructs a new actor.
+func NewActor(code cid.Cid, balance *types.AttoFIL) *Actor {
+	return &Actor{
+		Code:    code,
+		Head:    cid.Undef,
+		Nonce:   0,
+		Balance: balance,
+	}
+}
+
+// Empty tests whether the actor's code is defined.
+func (a *Actor) Empty() bool {
+	return !a.Code.Defined()
 }
 
 // IncNonce increments the nonce of this actor by 1.
@@ -56,16 +75,6 @@ func (a *Actor) Cid() (cid.Cid, error) {
 	}
 
 	return obj.Cid(), nil
-}
-
-// NewActor constructs a new actor.
-func NewActor(code cid.Cid, balance *types.AttoFIL) *Actor {
-	return &Actor{
-		Code:    code,
-		Head:    cid.Undef,
-		Nonce:   0,
-		Balance: balance,
-	}
 }
 
 // Unmarshal a actor from the given bytes.
@@ -92,7 +101,7 @@ func NextNonce(actor *Actor) (uint64, error) {
 	if actor == nil {
 		return 0, nil
 	}
-	if actor.Code.Defined() && !actor.Code.Equals(types.AccountActorCodeCid) {
+	if !(actor.Empty() || actor.Code.Equals(types.AccountActorCodeCid)) {
 		return 0, errors.New("next nonce only defined for account or empty actors")
 	}
 	return uint64(actor.Nonce), nil

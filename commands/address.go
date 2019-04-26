@@ -2,15 +2,16 @@ package commands
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 
-	"gx/ipfs/QmQmhotPUzVrMEWNK3x1R5jQ5ZHWyL7tVUrmRPjrBrvyCb/go-ipfs-files"
-	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/go-ipfs-files"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/api/impl"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -19,7 +20,6 @@ var walletCmd = &cmds.Command{
 		Tagline: "Manage your filecoin wallets",
 	},
 	Subcommands: map[string]*cmds.Command{
-		"addrs":   addrsCmd,
 		"balance": balanceCmd,
 		"import":  walletImportCmd,
 		"export":  walletExportCmd,
@@ -31,9 +31,10 @@ var addrsCmd = &cmds.Command{
 		Tagline: "Interact with addresses",
 	},
 	Subcommands: map[string]*cmds.Command{
-		"ls":     addrsLsCmd,
-		"new":    addrsNewCmd,
-		"lookup": addrsLookupCmd,
+		"ls":      addrsLsCmd,
+		"new":     addrsNewCmd,
+		"lookup":  addrsLookupCmd,
+		"default": defaultAddressCmd,
 	},
 }
 
@@ -48,7 +49,7 @@ type AddressLsResult struct {
 
 var addrsNewCmd = &cmds.Command{
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		addr, err := GetAPI(env).Address().Addrs().New(req.Context)
+		addr, err := GetPorcelainAPI(env).WalletNewAddress()
 		if err != nil {
 			return err
 		}
@@ -65,10 +66,7 @@ var addrsNewCmd = &cmds.Command{
 
 var addrsLsCmd = &cmds.Command{
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		addrs, err := GetAPI(env).Address().Addrs().Ls(req.Context)
-		if err != nil {
-			return err
-		}
+		addrs := GetPorcelainAPI(env).WalletAddresses()
 
 		var alr AddressLsResult
 		for _, addr := range addrs {
@@ -101,9 +99,9 @@ var addrsLookupCmd = &cmds.Command{
 			return err
 		}
 
-		v, err := GetAPI(env).Address().Addrs().Lookup(req.Context, addr)
+		v, err := GetPorcelainAPI(env).MinerGetPeerID(req.Context, addr)
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "failed to find miner with address %s", addr.String())
 		}
 		return re.Emit(v.Pretty())
 	},
@@ -111,6 +109,24 @@ var addrsLookupCmd = &cmds.Command{
 	Encoders: cmds.EncoderMap{
 		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, pid string) error {
 			_, err := fmt.Fprintln(w, pid)
+			return err
+		}),
+	},
+}
+
+var defaultAddressCmd = &cmds.Command{
+	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
+		addr, err := GetPorcelainAPI(env).WalletDefaultAddress()
+		if err != nil {
+			return err
+		}
+
+		return re.Emit(&addressResult{addr.String()})
+	},
+	Type: &addressResult{},
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, a *addressResult) error {
+			_, err := fmt.Fprintln(w, a.Address)
 			return err
 		}),
 	},
@@ -140,6 +156,11 @@ var balanceCmd = &cmds.Command{
 	},
 }
 
+// WalletSerializeResult is the type wallet export and import return and expect.
+type WalletSerializeResult struct {
+	KeyInfo []*types.KeyInfo
+}
+
 var walletImportCmd = &cmds.Command{
 	Arguments: []cmdkit.Argument{
 		cmdkit.FileArg("walletFile", true, false, "File containing wallet data to import").EnableStdin(),
@@ -155,7 +176,17 @@ var walletImportCmd = &cmds.Command{
 			return fmt.Errorf("given file was not a files.File")
 		}
 
-		addrs, err := GetAPI(env).Address().Import(req.Context, fi)
+		var wir *WalletSerializeResult
+		if err := json.NewDecoder(fi).Decode(&wir); err != nil {
+			return err
+		}
+		keyInfos := wir.KeyInfo
+
+		if len(keyInfos) == 0 {
+			return fmt.Errorf("no keys in wallet file")
+		}
+
+		addrs, err := GetPorcelainAPI(env).WalletImport(keyInfos)
 		if err != nil {
 			return err
 		}
@@ -195,19 +226,19 @@ var walletExportCmd = &cmds.Command{
 			addrs[i] = addr
 		}
 
-		kis, err := GetAPI(env).Address().Export(req.Context, addrs)
+		kis, err := GetPorcelainAPI(env).WalletExport(addrs)
 		if err != nil {
 			return err
 		}
 
-		var klr impl.WalletSerializeResult
+		var klr WalletSerializeResult
 		klr.KeyInfo = append(klr.KeyInfo, kis...)
 
 		return re.Emit(klr)
 	},
-	Type: &impl.WalletSerializeResult{},
+	Type: &WalletSerializeResult{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, klr *impl.WalletSerializeResult) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, klr *WalletSerializeResult) error {
 			for _, k := range klr.KeyInfo {
 				a, err := k.Address()
 				if err != nil {

@@ -5,22 +5,21 @@ import (
 	"fmt"
 	"math/big"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/exec"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
 // cpPlumbing is the subset of the plumbing.API that CreatePayments uses.
 type cpPlumbing interface {
+	ChainBlockHeight() (*types.BlockHeight, error)
+	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
 	MessageSend(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error)
-	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, *exec.FunctionSignature, error)
 	MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error
-	ChainLs(ctx context.Context) <-chan interface{}
 	SignBytes(data []byte, addr address.Address) (types.Signature, error)
 }
 
@@ -70,7 +69,7 @@ type CreatePaymentsReturn struct {
 	GasAttoFIL *types.AttoFIL
 
 	// Vouchers are the payment vouchers created to pay the target at regular intervals.
-	Vouchers []*paymentbroker.PaymentVoucher
+	Vouchers []*types.PaymentVoucher
 }
 
 // CreatePayments establishes a payment channel and create multiple payments against it
@@ -87,7 +86,7 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 	}
 
 	// get current block height
-	currentHeight, err := ChainBlockHeight(ctx, plumbing)
+	currentHeight, err := plumbing.ChainBlockHeight()
 	if err != nil {
 		return nil, errors.Wrap(err, "Could not retrieve block height for making payments")
 	}
@@ -95,7 +94,7 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 	// validate that channel expiry gives us enough time
 	lastPayment := currentHeight.Add(types.NewBlockHeight(config.Duration))
 	if config.ChannelExpiry.LessThan(lastPayment) {
-		return nil, fmt.Errorf("channel would expire (%s) before last payment is made (%d)", config.ChannelExpiry.String(), lastPayment)
+		return nil, fmt.Errorf("channel would expire (%s) before last payment is made (%s)", config.ChannelExpiry.String(), lastPayment)
 	}
 
 	response := &CreatePaymentsReturn{
@@ -137,7 +136,7 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 	valuePerPayment := *config.Value.MulBigInt(intervalAsBigInt).DivCeil(durationAsAttoFIL)
 
 	// generate payments
-	response.Vouchers = []*paymentbroker.PaymentVoucher{}
+	response.Vouchers = []*types.PaymentVoucher{}
 	voucherAmount := types.ZeroAttoFIL
 	for i := 0; uint64(i+1)*config.PaymentInterval < config.Duration; i++ {
 		voucherAmount = voucherAmount.Add(&valuePerPayment)
@@ -146,7 +145,7 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 		}
 
 		validAt := currentHeight.Add(types.NewBlockHeight(uint64(i+1) * config.PaymentInterval))
-		err = createPayment(ctx, plumbing, response, voucherAmount, validAt)
+		err = createPayment(ctx, plumbing, response, voucherAmount, validAt, nil)
 		if err != nil {
 			return response, err
 		}
@@ -154,7 +153,7 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 
 	if voucherAmount.LessThan(&config.Value) {
 		validAt := currentHeight.Add(types.NewBlockHeight(config.Duration))
-		err = createPayment(ctx, plumbing, response, &config.Value, validAt)
+		err = createPayment(ctx, plumbing, response, &config.Value, validAt, nil)
 		if err != nil {
 			return response, err
 		}
@@ -163,24 +162,26 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 	return response, nil
 }
 
-func createPayment(ctx context.Context, plumbing cpPlumbing, response *CreatePaymentsReturn, amount *types.AttoFIL, validAt *types.BlockHeight) error {
-	ret, _, err := plumbing.MessageQuery(ctx,
+func createPayment(ctx context.Context, plumbing cpPlumbing, response *CreatePaymentsReturn, amount *types.AttoFIL, validAt *types.BlockHeight, condition *types.Predicate) error {
+	ret, err := plumbing.MessageQuery(ctx,
 		response.From,
 		address.PaymentBrokerAddress,
 		"voucher",
 		response.Channel,
 		amount,
-		validAt)
+		validAt,
+		condition,
+	)
 	if err != nil {
 		return err
 	}
 
-	var voucher paymentbroker.PaymentVoucher
+	var voucher types.PaymentVoucher
 	if err := cbor.DecodeInto(ret[0], &voucher); err != nil {
 		return err
 	}
 
-	sig, err := paymentbroker.SignVoucher(&voucher.Channel, amount, validAt, voucher.Payer, plumbing)
+	sig, err := paymentbroker.SignVoucher(&voucher.Channel, amount, validAt, voucher.Payer, condition, plumbing)
 	if err != nil {
 		return err
 	}

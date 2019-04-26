@@ -5,7 +5,8 @@ import (
 	"testing"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
+	"github.com/stretchr/testify/assert"
 )
 
 // TODO: tests that check the exact serialization of different inputs.
@@ -13,6 +14,8 @@ import (
 // things.
 
 func TestBasicEncodingRoundTrip(t *testing.T) {
+	tf.UnitTest(t)
+
 	addrGetter := address.NewForTestGetter()
 
 	cases := map[string][]interface{}{
@@ -29,12 +32,11 @@ func TestBasicEncodingRoundTrip(t *testing.T) {
 
 	for tname, tcase := range cases {
 		t.Run(tname, func(t *testing.T) {
-			assert := assert.New(t)
 			vals, err := ToValues(tcase)
-			assert.NoError(err)
+			assert.NoError(t, err)
 
 			data, err := EncodeValues(vals)
-			assert.NoError(err)
+			assert.NoError(t, err)
 
 			var types []Type
 			for _, val := range vals {
@@ -42,10 +44,10 @@ func TestBasicEncodingRoundTrip(t *testing.T) {
 			}
 
 			outVals, err := DecodeValues(data, types)
-			assert.NoError(err)
-			assert.Equal(vals, outVals)
+			assert.NoError(t, err)
+			assert.Equal(t, vals, outVals)
 
-			assert.Equal(tcase, FromValues(outVals))
+			assert.Equal(t, tcase, FromValues(outVals))
 		})
 	}
 }
@@ -56,6 +58,8 @@ type fooTestStruct struct {
 }
 
 func TestToValuesFailures(t *testing.T) {
+	tf.UnitTest(t)
+
 	cases := []struct {
 		name   string
 		vals   []interface{}
@@ -80,9 +84,8 @@ func TestToValuesFailures(t *testing.T) {
 
 	for _, tcase := range cases {
 		t.Run(tcase.name, func(t *testing.T) {
-			assert := assert.New(t)
 			_, err := ToValues(tcase.vals)
-			assert.EqualError(err, tcase.expErr)
+			assert.EqualError(t, err, tcase.expErr)
 		})
 	}
 }

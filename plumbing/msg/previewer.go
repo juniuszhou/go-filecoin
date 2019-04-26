@@ -3,9 +3,9 @@ package msg
 import (
 	"context"
 
-	hamt "gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	bstore "gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	hamt "github.com/ipfs/go-hamt-ipld"
+	bstore "github.com/ipfs/go-ipfs-blockstore"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
@@ -41,8 +41,8 @@ func (p *Previewer) Preview(ctx context.Context, optFrom, to address.Address, me
 		return types.NewGasUnits(0), errors.Wrap(err, "couldnt encode message params")
 	}
 
-	headTs := p.chainReader.Head()
-	tsas, err := p.chainReader.GetTipSetAndState(ctx, headTs.String())
+	headTs := p.chainReader.GetHead()
+	tsas, err := p.chainReader.GetTipSetAndState(headTs)
 	if err != nil {
 		return types.NewGasUnits(0), errors.Wrap(err, "couldnt get latest state root")
 	}
@@ -50,7 +50,7 @@ func (p *Previewer) Preview(ctx context.Context, optFrom, to address.Address, me
 	if err != nil {
 		return types.NewGasUnits(0), errors.Wrap(err, "could load tree for latest state root")
 	}
-	h, err := headTs.Height()
+	h, err := tsas.TipSet.Height()
 	if err != nil {
 		return types.NewGasUnits(0), errors.Wrap(err, "couldnt get base tipset height")
 	}

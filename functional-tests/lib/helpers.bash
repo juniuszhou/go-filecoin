@@ -7,12 +7,19 @@ function finish {
 
   echo ""
   echo "cleaning up..."
-  kill "$MN_PID" || true
+  kill "$BOOTSTRAP_MN_PID" || true
+  kill "$STORAGE_MN_PID" || true
   kill "$CL_PID" || true
 
   # Force KILL after MAX_WAIT seconds if the daemons don't exit
   (
-    sleep $MAX_WAIT && kill -9 "$MN_PID";
+    sleep $MAX_WAIT && kill -9 "$BOOTSTRAP_MN_PID";
+    echo "Sent SIGKILL to BOOTSTRAP_MN, daemon failed to stop within $MAX_WAIT second at end of test";
+  ) & WAITER_BOOTSTRAP_MN=$!
+
+  # Force KILL after MAX_WAIT seconds if the daemons don't exit
+  (
+    sleep $MAX_WAIT && kill -9 "$STORAGE_MN_PID";
     echo "Sent SIGKILL to MN, daemon failed to stop within $MAX_WAIT second at end of test";
   ) & WAITER_MN=$!
 
@@ -22,10 +29,12 @@ function finish {
   ) & WAITER_CL=$!
 
   # Wait for daemons to exit
-  wait "$MN_PID"
+  wait "$BOOTSTRAP_MN_PID"
+  wait "$STORAGE_MN_PID"
   wait "$CL_PID"
 
   # Kill watchers
+  kill $WAITER_BOOTSTRAP_MN
   kill $WAITER_MN
   kill $WAITER_CL
 
@@ -33,6 +42,7 @@ function finish {
   rm -f "${PIECE_2_PATH}"
   rm -f "${UNSEAL_PATH}"
   rm -rf "${CL_REPO_DIR}"
+  rm -rf "${BOOTSTRAP_MN_REPO_DIR}"
   rm -rf "${MN_REPO_DIR}"
 }
 
@@ -41,7 +51,7 @@ function free_port {
 }
 
 function import_private_key {
-  ./go-filecoin wallet import ./fixtures/"$1".key \
+  ./go-filecoin wallet import "${FIXTURES_PATH}/$1".key \
     --repodir="$2"
 }
 
@@ -129,24 +139,46 @@ function wait_for_message_in_chain_by_method_and_sender {
   local __chain=""
   local __hodl=""
 
+  # set the maximum number of chain polls to FLOOR(seconds/10)
+  local __polls_remaining=$(($( printf "%.0f" "$4" )/10))
+
   while [ -z $__hodl ]; do
-    __chain=$(chain_ls "$3")
+    # dump chain state to stdout if we time out
+    if [ $__polls_remaining -eq 0 ]
+    then
+        echo "timed out after waiting seconds=$4 for method=$1, sent from address=$2, to be included in repodir=$3 chain..."
+        chain_ls "$3"
+        unset IFS
+        exit 1
+    fi
 
-    __hodl=""
-    for blk in $__chain
-    do
-        __hodl=$(echo "$blk" | jq ".[].messages[].meteredMessage.message | select(.method == \"$1\").from | select(. == \"$2\")" 2>/dev/null | head -n 1 || true)
-        if [ ! -z "$__hodl" ]; then
-          break
-        fi
-    done
+    __hodl=$(echo "$(chain_ls "$3")" | jq ".[] | select(.messages != null) | .messages[].meteredMessage.message | select(.method == \"$1\").from | select(. == \"$2\")" 2>/dev/null | head -n 1 || true)
 
-    echo "$(date "+%T") - sleeping for 10 seconds"
+    __polls_remaining=$((__polls_remaining - 1))
+    local seconds_remaining=$((__polls_remaining*10))
+    echo "$(date "+%T") - sleeping for 10 seconds ($seconds_remaining seconds remaining - method=$1, sent from address=$2)"
     echo "$__hodl"
     sleep 10
   done
 
   unset IFS
+}
+
+function create_miner {
+  ./go-filecoin miner create 10 100 \
+    --gas-limit=10000 \
+    --gas-price=1 \
+    --repodir="$1"
+}
+
+function send_fil {
+  ./go-filecoin message send \
+    --from "$1" \
+    --value $2 \
+    --gas-limit=10000 \
+    --gas-price=1 \
+    "$3" \
+    --repodir="$4"
 }
 
 function set_wallet_default_address_in_config {
@@ -165,21 +197,18 @@ function wait_mpool_size {
     --repodir="$2"
 }
 
-function add_ask {
-  ./go-filecoin miner add-ask "$1" "$2" "$3" \
-    --price=0 --limit=300 \
-    --repodir="$4"
+function set_price {
+  ./go-filecoin miner set-price --repodir="$3" --gas-price=1 --gas-limit=300 "$1" "$2" --enc=json | jq -r .MinerSetPriceResponse.AddAskCid.'"\/"'
 }
 
 function miner_update_pid {
   ./go-filecoin miner update-peerid "$1" "$2" \
-    --price=0 --limit=300 \
+    --gas-price=1 --gas-limit=300 \
     --repodir="$3"
 }
 
-function mine_once {
-  ./go-filecoin mining once \
-    --repodir="$1"
+function message_wait {
+    ./go-filecoin message wait $1 --repodir=$2
 }
 
 function fork_message_wait {

@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
-	"gx/ipfs/QmdBzoMxsBpojBfN1cv5GnKtB7sfYBMoLH7p9qSyEVYXcu/refmt/obj"
-	"gx/ipfs/QmdBzoMxsBpojBfN1cv5GnKtB7sfYBMoLH7p9qSyEVYXcu/refmt/shared"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/pkg/errors"
+	"github.com/polydawn/refmt/obj"
+	"github.com/polydawn/refmt/shared"
 
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/address"
@@ -243,33 +243,38 @@ func (t *tree) debugPointer(ps []*hamt.Pointer) {
 	}
 }
 
-// GetAllActors returns a slice of all actors in the StateTree, t.
-func GetAllActors(t Tree) ([]string, []*actor.Actor) {
-	st := t.(*tree)
-
-	return st.getActorsFromPointers(st.root.Pointers)
+// GetAllActorsResult is the struct returned via a channel by the GetAllActors
+// method. This struct contains only an address string and the actor itself.
+type GetAllActorsResult struct {
+	Address string
+	Actor   *actor.Actor
+	Error   error
 }
 
-// GetAllActorsFromStoreFunc is a function with the signature of GetAllActorsFromStore
-type GetAllActorsFromStoreFunc = func(context.Context, *hamt.CborIpldStore, cid.Cid) ([]string, []*actor.Actor, error)
+// GetAllActors returns a channel which provides all actors in the StateTree, t.
+func GetAllActors(ctx context.Context, t Tree) <-chan GetAllActorsResult {
+	st := t.(*tree)
+	out := make(chan GetAllActorsResult)
+	go func() {
+		defer close(out)
+		st.getActorsFromPointers(ctx, out, st.root.Pointers)
+	}()
+	return out
+}
 
-// GetAllActorsFunc is a function with the signature of GetAllActors
-type GetAllActorsFunc = func(t Tree) ([]string, []*actor.Actor)
-
-// GetAllActorsFromStore loads a StateTree and returns arrays of addresses and their corresponding actors.
-// Third returned value is any error that occurred when loading.
-func GetAllActorsFromStore(ctx context.Context, store *hamt.CborIpldStore, stateRoot cid.Cid) ([]string, []*actor.Actor, error) {
+// GetAllActorsFromStore loads a StateTree and returns a channel with addresses
+// and their corresponding actors. The second returned value is any error that
+// occurred when loading.
+func GetAllActorsFromStore(ctx context.Context, store *hamt.CborIpldStore, stateRoot cid.Cid) (<-chan GetAllActorsResult, error) {
 	st, err := LoadStateTree(ctx, store, stateRoot, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	addrs, actors := GetAllActors(st)
-	return addrs, actors, nil
+	return GetAllActors(ctx, st), nil
 }
 
 // NOTE: This extracts actors from pointers recursively. Maybe we shouldn't recurse here.
-func (t *tree) getActorsFromPointers(ps []*hamt.Pointer) (addresses []string, actors []*actor.Actor) {
+func (t *tree) getActorsFromPointers(ctx context.Context, out chan<- GetAllActorsResult, ps []*hamt.Pointer) {
 	for _, p := range ps {
 		for _, kv := range p.KVs {
 			var a actor.Actor
@@ -277,8 +282,18 @@ func (t *tree) getActorsFromPointers(ps []*hamt.Pointer) (addresses []string, ac
 				panic(err) // uhm, ignoring errors is bad
 			}
 
-			addresses = append(addresses, kv.Key)
-			actors = append(actors, &a)
+			select {
+			case <-ctx.Done():
+				out <- GetAllActorsResult{
+					Error: ctx.Err(),
+				}
+				return
+			default:
+				out <- GetAllActorsResult{
+					Address: kv.Key,
+					Actor:   &a,
+				}
+			}
 		}
 		if p.Link.Defined() {
 			n, err := hamt.LoadNode(context.Background(), t.store, p.Link)
@@ -287,10 +302,7 @@ func (t *tree) getActorsFromPointers(ps []*hamt.Pointer) (addresses []string, ac
 			if err != nil {
 				continue
 			}
-			moreAddrs, moreActors := t.getActorsFromPointers(n.Pointers)
-			addresses = append(addresses, moreAddrs...)
-			actors = append(actors, moreActors...)
+			t.getActorsFromPointers(ctx, out, n.Pointers)
 		}
 	}
-	return
 }

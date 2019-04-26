@@ -1,11 +1,13 @@
 package wallet
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -67,10 +69,6 @@ func (w *Wallet) Find(addr address.Address) (Backend, error) {
 // Addresses retrieves all stored addresses.
 // Safe for concurrent access.
 // Always sorted in the same order.
-// Note that the Golang runtime randomizes map iteration order, so the order in
-// which addresses appear in the returned list may differ across Addresses()
-// calls for the same wallet.
-// TODO: Should we make this ordering deterministic?
 func (w *Wallet) Addresses() []address.Address {
 	w.lk.Lock()
 	defer w.lk.Unlock()
@@ -81,6 +79,9 @@ func (w *Wallet) Addresses() []address.Address {
 			out = append(out, backend.Addresses()...)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return bytes.Compare(out[i].Bytes(), out[j].Bytes()) < 0
+	})
 
 	return out
 }
@@ -101,9 +102,26 @@ func (w *Wallet) SignBytes(data []byte, addr address.Address) (types.Signature, 
 	// Check that we are storing the address to sign for.
 	backend, err := w.Find(addr)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to sign data with address: %s", addr)
+		return nil, errors.Wrapf(err, "could not find address: %s", addr)
 	}
 	return backend.SignBytes(data, addr)
+}
+
+// GetAddressForPubKey looks up a KeyInfo address associated with a given PublicKey
+func (w *Wallet) GetAddressForPubKey(pk []byte) (address.Address, error) {
+	var addr address.Address
+	addrs := w.Addresses()
+	for _, addr = range addrs {
+		testPk, err := w.GetPubKeyForAddress(addr)
+		if err != nil {
+			return addr, errors.New("could not fetch public key")
+		}
+
+		if bytes.Equal(testPk, pk) {
+			return addr, nil
+		}
+	}
+	return addr, errors.New("public key not found in wallet")
 }
 
 // Verify cryptographically verifies that 'sig' is the signed hash of 'data' with
@@ -124,7 +142,7 @@ func (w *Wallet) Ecrecover(data []byte, sig types.Signature) ([]byte, error) {
 func NewAddress(w *Wallet) (address.Address, error) {
 	backends := w.Backends(DSBackendType)
 	if len(backends) == 0 {
-		return address.Address{}, fmt.Errorf("missing default ds backend")
+		return address.Undef, fmt.Errorf("missing default ds backend")
 	}
 
 	backend := (backends[0]).(*DSBackend)
@@ -138,11 +156,8 @@ func (w *Wallet) GetPubKeyForAddress(addr address.Address) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	pubkey, err := info.PublicKey()
-	if err != nil {
-		return nil, err
-	}
-	return pubkey, nil
+
+	return info.PublicKey(), nil
 }
 
 // NewKeyInfo creates a new KeyInfo struct in the wallet backend and returns it
@@ -166,4 +181,50 @@ func (w *Wallet) keyInfoForAddr(addr address.Address) (*types.KeyInfo, error) {
 		return &types.KeyInfo{}, err
 	}
 	return info, nil
+}
+
+// Import adds the given keyinfos to the wallet
+func (w *Wallet) Import(kinfos []*types.KeyInfo) ([]address.Address, error) {
+	dsb := w.Backends(DSBackendType)
+	if len(dsb) != 1 {
+		return nil, fmt.Errorf("expected exactly one datastore wallet backend")
+	}
+
+	imp, ok := dsb[0].(Importer)
+	if !ok {
+		return nil, fmt.Errorf("datastore backend wallets should implement importer")
+	}
+
+	var out []address.Address
+	for _, ki := range kinfos {
+		if err := imp.ImportKey(ki); err != nil {
+			return nil, err
+		}
+
+		a, err := ki.Address()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// Export returns the KeyInfos for the given wallet addresses
+func (w *Wallet) Export(addrs []address.Address) ([]*types.KeyInfo, error) {
+	out := make([]*types.KeyInfo, len(addrs))
+	for i, addr := range addrs {
+		bck, err := w.Find(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		ki, err := bck.GetKeyInfo(addr)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = ki
+	}
+
+	return out, nil
 }

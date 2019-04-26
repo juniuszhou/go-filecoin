@@ -2,12 +2,13 @@ package chain
 
 import (
 	"context"
+	"github.com/filecoin-project/go-filecoin/actor"
+	"github.com/filecoin-project/go-filecoin/address"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
-	"gx/ipfs/QmdbxjQWogRCHRaxhhGnYdT1oQJzL9GdqSKzCdqWr85AP2/pubsub"
+	"github.com/cskr/pubsub"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-datastore"
 
-	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -30,17 +31,16 @@ type ReadStore interface {
 	// GetTipSet retrieves the tipindex value (tipset, state) at the
 	// provided tipset key if in the store and an error if it does not
 	// exist.
-	GetTipSetAndState(ctx context.Context, tsKey string) (*TipSetAndState, error)
+	GetTipSetAndState(tsKey types.SortedCidSet) (*TipSetAndState, error)
 	// GetBlock gets a block by cid.
 	GetBlock(ctx context.Context, id cid.Cid) (*types.Block, error)
 
 	HeadEvents() *pubsub.PubSub
-	// Head returns the head of the chain tracked by the store.
-	Head() types.TipSet
-	// LatestState returns the latest state of the head
-	LatestState(ctx context.Context) (state.Tree, error)
+	// GetHead returns the head of the chain tracked by the store.
+	GetHead() types.SortedCidSet
+	// ActorFromLatestState tries to get an actor from the latest state
+	ActorFromLatestState(ctx context.Context, address address.Address) (*actor.Actor, error)
 
-	BlockHistory(ctx context.Context, tips types.TipSet) <-chan interface{}
 	GenesisCid() cid.Cid
 }
 
@@ -61,12 +61,12 @@ type Store interface {
 	// HasTipSet indicates whether the tipset is in the store.
 	HasTipSetAndState(ctx context.Context, tsKey string) bool
 	// GetTipSetsByParentsAndHeight returns all tipsets with the given parent set and the given height
-	GetTipSetAndStatesByParentsAndHeight(ctx context.Context, pTsKey string, h uint64) ([]*TipSetAndState, error)
+	GetTipSetAndStatesByParentsAndHeight(pTsKey string, h uint64) ([]*TipSetAndState, error)
 	// HasTipSetsWithParentsAndHeight indicates whether tipsets with these parents and this height are in the store.
-	HasTipSetAndStatesWithParentsAndHeight(ctx context.Context, pTsKey string, h uint64) bool
+	HasTipSetAndStatesWithParentsAndHeight(pTsKey string, h uint64) bool
 
 	// GetBlocks gets several blocks by cid. In the future there is caching here
-	GetBlocks(ctx context.Context, ids types.SortedCidSet) ([]*types.Block, error)
+	GetBlocks(ctx context.Context, cids types.SortedCidSet) ([]*types.Block, error)
 	// HasAllBlocks indicates whether the blocks are in the store.
 	HasAllBlocks(ctx context.Context, cs []cid.Cid) bool
 	HasBlock(ctx context.Context, c cid.Cid) bool

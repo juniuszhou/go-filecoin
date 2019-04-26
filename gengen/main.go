@@ -2,13 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
+	flg "flag"
 	"fmt"
 	"os"
 	"time"
 
-	fcapi "github.com/filecoin-project/go-filecoin/api/impl"
-	gengen "github.com/filecoin-project/go-filecoin/gengen/util"
+	"github.com/filecoin-project/go-filecoin/commands"
+	"github.com/filecoin-project/go-filecoin/gengen/util"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -27,7 +27,7 @@ func writeKey(ki *types.KeyInfo, name string, jsonout bool) error {
 	}
 	defer fi.Close() // nolint: errcheck
 
-	var wir fcapi.WalletSerializeResult
+	var wir commands.WalletSerializeResult
 	wir.KeyInfo = append(wir.KeyInfo, ki)
 
 	return json.NewEncoder(fi).Encode(wir)
@@ -60,17 +60,24 @@ The outputted file can be used by go-filecoin during init to
 set the initial genesis block:
 $ go-filecoin init --genesisfile=genesis.car
 */
+
+var (
+	flag = flg.NewFlagSet(os.Args[0], flg.ExitOnError)
+)
+
 func main() {
 	var defaultSeed = time.Now().Unix()
 
 	jsonout := flag.Bool("json", false, "sets output to be json")
+	testProofsMode := flag.Bool("test-proofs-mode", false, "change sealing, sector packing, PoSt, etc. to be compatible with test environments")
 	keypath := flag.String("keypath", ".", "sets location to write key files to")
 	outJSON := flag.String("out-json", "", "enables json output and writes it to the given file")
 	outCar := flag.String("out-car", "", "writes the generated car file to the give path, instead of stdout")
 	configFilePath := flag.String("config", "", "reads configuration from this json file, instead of stdin")
 	seed := flag.Int64("seed", defaultSeed, "provides the seed for randomization, defaults to current unix epoch")
 
-	flag.Parse()
+	// ExitOnError is set
+	flag.Parse(os.Args[1:]) // nolint: errcheck
 
 	jsonEnabled := *jsonout || *outJSON != ""
 
@@ -86,6 +93,10 @@ func main() {
 			panic(err)
 		}
 		outfile = f
+	}
+	cfg.ProofsMode = types.LiveProofsMode
+	if *testProofsMode {
+		cfg.ProofsMode = types.TestProofsMode
 	}
 	info, err := gengen.GenGenesisCar(cfg, outfile, *seed)
 	if err != nil {

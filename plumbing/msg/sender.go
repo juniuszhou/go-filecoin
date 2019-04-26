@@ -4,51 +4,88 @@ import (
 	"context"
 	"sync"
 
+	"github.com/ipfs/go-cid"
+	hamt "github.com/ipfs/go-hamt-ipld"
+	"github.com/pkg/errors"
+
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
+	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/chain"
+	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/core"
-	"github.com/filecoin-project/go-filecoin/repo"
+	"github.com/filecoin-project/go-filecoin/metrics"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
-	"github.com/filecoin-project/go-filecoin/wallet"
-
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
 )
+
+var msgSendErrCt = metrics.NewInt64Counter("message_sender_error", "Number of errors encountered while sending a message")
 
 // Topic is the network pubsub topic identifier on which new messages are announced.
 const Topic = "/fil/msgs"
+
+// Abstracts over a store of blockchain state.
+type chainState interface {
+	GetHead() types.SortedCidSet
+	GetTipSetAndState(tsKey types.SortedCidSet) (*chain.TipSetAndState, error)
+}
+
+// BlockClock defines a interface to a struct that can give the current block height.
+type BlockClock interface {
+	BlockHeight() (uint64, error)
+}
 
 // PublishFunc is a function the Sender calls to publish a message to the network.
 type PublishFunc func(topic string, data []byte) error
 
 // Sender is plumbing implementation that knows how to send a message.
 type Sender struct {
-	// For getting the default address.
-	repo   repo.Repo
-	wallet *wallet.Wallet
-
-	// For getting the latest nonce and enqueuing messages.
-	chainReader chain.ReadStore
-	msgPool     *core.MessagePool
-
-	// To publish the new message to the network.
+	// Signs messages.
+	signer types.Signer
+	// Provides actor state
+	chainState chainState
+	// To load the tree for the head tipset state root.
+	cst *hamt.CborIpldStore
+	// Provides the current block height
+	blockTimer BlockClock
+	// Tracks inbound messages for mining
+	inbox *core.MessagePool
+	// Tracks outbound messages
+	outbox *core.MessageQueue
+	// Validates messages before sending them.
+	validator consensus.SignedMessageValidator
+	// Invoked to publish the new message to the network.
 	publish PublishFunc
-
-	// Locking in send reduces the chance of nonce collision.
+	// Protects the "next nonce" calculation to avoid collisions.
 	l sync.Mutex
 }
 
 // NewSender returns a new Sender. There should be exactly one of these per node because
 // sending locks to reduce nonce collisions.
-func NewSender(repo repo.Repo, wallet *wallet.Wallet, chainReader chain.ReadStore, msgPool *core.MessagePool, publish PublishFunc) *Sender {
-	return &Sender{repo: repo, wallet: wallet, chainReader: chainReader, msgPool: msgPool, publish: publish}
+func NewSender(signer types.Signer, chainReader chain.ReadStore, cst *hamt.CborIpldStore, blockTimer BlockClock,
+	msgQueue *core.MessageQueue, msgPool *core.MessagePool,
+	validator consensus.SignedMessageValidator, publish PublishFunc) *Sender {
+	return &Sender{
+		signer:     signer,
+		chainState: chainReader,
+		cst:        cst,
+		blockTimer: blockTimer,
+		inbox:      msgPool,
+		outbox:     msgQueue,
+		validator:  validator,
+		publish:    publish,
+	}
 }
 
 // Send sends a message. See api description.
-func (s *Sender) Send(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
+func (s *Sender) Send(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (out cid.Cid, err error) {
+	defer func() {
+		if err != nil {
+			msgSendErrCt.Inc(ctx, 1)
+		}
+	}()
+
 	encodedParams, err := abi.ToEncodedValues(params...)
 	if err != nil {
 		return cid.Undef, errors.Wrap(err, "invalid params")
@@ -58,20 +95,35 @@ func (s *Sender) Send(ctx context.Context, from, to address.Address, value *type
 	s.l.Lock()
 	defer s.l.Unlock()
 
-	st, err := s.chainReader.LatestState(ctx)
+	headTs := s.chainState.GetHead()
+	tsas, err := s.chainState.GetTipSetAndState(headTs)
+	if err != nil {
+		return cid.Undef, errors.Wrap(err, "couldnt get latest state root")
+	}
+	st, err := state.LoadStateTree(ctx, s.cst, tsas.TipSetStateRoot, builtin.Actors)
 	if err != nil {
 		return cid.Undef, errors.Wrap(err, "failed to load state from chain")
 	}
 
-	nonce, err := nextNonce(ctx, st, s.msgPool, from)
+	fromActor, err := st.GetActor(ctx, from)
 	if err != nil {
-		return cid.Undef, errors.Wrap(err, "couldn't get next nonce")
+		return cid.Undef, errors.Wrapf(err, "no actor at address %s", from)
+	}
+
+	nonce, err := nextNonce(fromActor, s.outbox, from)
+	if err != nil {
+		return cid.Undef, errors.Wrapf(err, "failed calculating nonce for actor %s", from)
 	}
 
 	msg := types.NewMessage(from, to, nonce, value, method, encodedParams)
-	smsg, err := types.NewSignedMessage(*msg, s.wallet, gasPrice, gasLimit)
+	smsg, err := types.NewSignedMessage(*msg, s.signer, gasPrice, gasLimit)
 	if err != nil {
 		return cid.Undef, errors.Wrap(err, "failed to sign message")
+	}
+
+	err = s.validator.Validate(ctx, smsg, fromActor)
+	if err != nil {
+		return cid.Undef, errors.Wrap(err, "invalid message")
 	}
 
 	smsgdata, err := smsg.Marshal()
@@ -79,33 +131,36 @@ func (s *Sender) Send(ctx context.Context, from, to address.Address, value *type
 		return cid.Undef, errors.Wrap(err, "failed to marshal message")
 	}
 
-	if _, err := s.msgPool.Add(smsg); err != nil {
-		return cid.Undef, errors.Wrap(err, "failed to add message to the message pool")
+	height, err := s.blockTimer.BlockHeight()
+	if err != nil {
+		return cid.Undef, errors.Wrap(err, "failed to get block height")
+	}
+
+	// Add to the local message queue/pool at the last possible moment before broadcasting to network.
+	if err := s.outbox.Enqueue(smsg, height); err != nil {
+		return cid.Undef, errors.Wrap(err, "failed to add message to outbound queue")
+	}
+	if _, err := s.inbox.Add(ctx, smsg); err != nil {
+		return cid.Undef, errors.Wrap(err, "failed to add message to message pool")
 	}
 
 	if err = s.publish(Topic, smsgdata); err != nil {
-		return cid.Undef, errors.Wrap(err, "couldnt publish new message to network")
+		return cid.Undef, errors.Wrap(err, "failed to publish message to network")
 	}
 
 	log.Debugf("MessageSend with message: %s", smsg)
-
 	return smsg.Cid()
 }
 
 // nextNonce returns the next expected nonce value for an account actor. This is the larger
 // of the actor's nonce value, or one greater than the largest nonce from the actor found in the message pool.
-// The address must be the address of an account actor, or be not contained in, in the provided state tree.
-func nextNonce(ctx context.Context, st state.Tree, pool *core.MessagePool, address address.Address) (nonce uint64, err error) {
-	act, err := st.GetActor(ctx, address)
-	if err != nil && !state.IsActorNotFoundError(err) {
-		return 0, err
-	}
+func nextNonce(act *actor.Actor, outbox *core.MessageQueue, address address.Address) (uint64, error) {
 	actorNonce, err := actor.NextNonce(act)
 	if err != nil {
 		return 0, err
 	}
 
-	poolNonce, found := core.LargestNonce(pool, address)
+	poolNonce, found := outbox.LargestNonce(address)
 	if found && poolNonce >= actorNonce {
 		return poolNonce + 1, nil
 	}

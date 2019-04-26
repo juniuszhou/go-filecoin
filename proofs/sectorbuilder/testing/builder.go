@@ -4,16 +4,17 @@ import (
 	"io/ioutil"
 	"testing"
 
-	bstore "gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	offline "gx/ipfs/QmSz8kAe2JCKp2dWSG8gHSWnwSmne8YfRXTeK5HBmc9L7t/go-ipfs-exchange-offline"
-	bserv "gx/ipfs/QmZsGVGCqMCNzHLNMB6q4F6yyvomqf1VxwhJwSfgo1NGaF/go-blockservice"
+	bserv "github.com/ipfs/go-blockservice"
+	bstore "github.com/ipfs/go-ipfs-blockstore"
+	offline "github.com/ipfs/go-ipfs-exchange-offline"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/proofs/sectorbuilder"
 	"github.com/filecoin-project/go-filecoin/repo"
+	"github.com/filecoin-project/go-filecoin/types"
 
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
+	"github.com/stretchr/testify/require"
 )
 
 // Builder is used to create a SectorBuilder test harness
@@ -69,11 +70,12 @@ func (b *Builder) Build() Harness {
 	memRepo := repo.NewInMemoryRepoWithSectorDirectories(b.stagingDir, b.sealedDir)
 	blockStore := bstore.NewBlockstore(memRepo.Datastore())
 	blockService := bserv.New(blockStore, offline.Exchange(blockStore))
-	minerAddr := address.MakeTestAddress("wombat")
+	minerAddr, err := address.NewActorAddress([]byte("wombat"))
+	if err != nil {
+		panic(err)
+	}
 
-	// TODO: Replace this with proofs.Live plus a sector size (in this case,
-	// "small" or 127 (bytes).
-	sectorStoreType := proofs.Test
+	class := types.NewTestSectorClass()
 
 	sb, err := sectorbuilder.NewRustSectorBuilder(sectorbuilder.RustSectorBuilderConfig{
 		BlockService:     blockService,
@@ -81,12 +83,12 @@ func (b *Builder) Build() Harness {
 		MetadataDir:      memRepo.StagingDir(),
 		MinerAddr:        minerAddr,
 		SealedSectorDir:  memRepo.SealedDir(),
-		SectorStoreType:  sectorStoreType,
+		SectorClass:      class,
 		StagedSectorDir:  memRepo.StagingDir(),
 	})
 	require.NoError(b.t, err)
 
-	n, err := sb.GetMaxUserBytesPerStagedSector()
+	max, err := proofs.GetMaxUserBytesPerStagedSector(class.SectorSize())
 	require.NoError(b.t, err)
 
 	return Harness{
@@ -95,7 +97,6 @@ func (b *Builder) Build() Harness {
 		blockService:      blockService,
 		SectorBuilder:     sb,
 		MinerAddr:         minerAddr,
-		MaxBytesPerSector: n,
-		SectorConfig:      sectorStoreType,
+		MaxBytesPerSector: max,
 	}
 }

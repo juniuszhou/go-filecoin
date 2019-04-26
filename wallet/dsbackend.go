@@ -1,15 +1,13 @@
 package wallet
 
 import (
-	"crypto/ecdsa"
-	"fmt"
 	"reflect"
 	"strings"
 	"sync"
 
-	ds "gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
-	dsq "gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore/query"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	ds "github.com/ipfs/go-datastore"
+	dsq "github.com/ipfs/go-datastore/query"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/crypto"
@@ -100,17 +98,17 @@ func (backend *DSBackend) HasAddress(addr address.Address) bool {
 func (backend *DSBackend) NewAddress() (address.Address, error) {
 	prv, err := crypto.GenerateKey()
 	if err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
 	// TODO: maybe the above call should just return a keyinfo?
 	ki := &types.KeyInfo{
-		PrivateKey: crypto.ECDSAToBytes(prv),
+		PrivateKey: prv,
 		Curve:      SECP256K1,
 	}
 
 	if err := backend.putKeyInfo(ki); err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
 	return ki.Address()
@@ -145,18 +143,13 @@ func (backend *DSBackend) SignBytes(data []byte, addr address.Address) (types.Si
 		return nil, err
 	}
 
-	privateKey, _, err := keysFromInfo(ki)
-	if err != nil {
-		return nil, err
-	}
-
-	return wutil.Sign(privateKey, data)
+	return wutil.Sign(ki.Key(), data)
 }
 
 // Verify cryptographically verifies that 'sig' is the signed hash of 'data' with
 // the public key `pk`.
-func (backend *DSBackend) Verify(data []byte, pk []byte, sig types.Signature) (bool, error) {
-	return wutil.Verify(pk, data, sig)
+func (backend *DSBackend) Verify(data, pk []byte, sig types.Signature) bool {
+	return crypto.Verify(pk, data, sig)
 }
 
 // GetKeyInfo will return the private & public keys associated with address `addr`
@@ -178,18 +171,4 @@ func (backend *DSBackend) GetKeyInfo(addr address.Address) (*types.KeyInfo, erro
 	}
 
 	return ki, nil
-}
-
-func keysFromInfo(ki *types.KeyInfo) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
-	// Developer error if we add a new type and don't update this method
-	if ki.Type() != SECP256K1 {
-		panic(fmt.Sprintf("unknown key type %s", ki.Type()))
-	}
-
-	prv, err := crypto.BytesToECDSA(ki.Key())
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to unmarshal private key")
-	}
-
-	return prv, &prv.PublicKey, nil
 }

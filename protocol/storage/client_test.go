@@ -1,4 +1,4 @@
-package storage
+package storage_test
 
 import (
 	"context"
@@ -6,125 +6,109 @@ import (
 	"testing"
 	"time"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	"gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore/query"
-	"gx/ipfs/QmZNkThpqfVXs9GNbexPrfBbXSLNYeKrE7jwFM2oqHbyqN/go-libp2p-protocol"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p-host"
+	"github.com/libp2p/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p-protocol"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
-	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/porcelain"
-	"github.com/filecoin-project/go-filecoin/repo"
+	. "github.com/filecoin-project/go-filecoin/protocol/storage"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/storagedeal"
+	th "github.com/filecoin-project/go-filecoin/testhelpers"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/util/convert"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
 var testSignature = types.Signature("<test signature>")
 
 func TestProposeDeal(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	tf.UnitTest(t)
 
+	ctx := context.Background()
 	addressCreator := address.NewForTestGetter()
-	cidCreator := types.NewCidForTestGetter()
 
-	var proposal *SignedDealProposal
+	var proposal *storagedeal.SignedDealProposal
 
 	testNode := newTestClientNode(func(request interface{}) (interface{}, error) {
-		p, ok := request.(*SignedDealProposal)
-		require.True(ok)
+		p, ok := request.(*storagedeal.SignedDealProposal)
+		require.True(t, ok)
 		proposal = p
 
-		pcid, err := convert.ToCid(p.DealProposal)
-		require.NoError(err)
-		return &DealResponse{
-			State:       Accepted,
+		pcid, err := convert.ToCid(p.Proposal)
+		require.NoError(t, err)
+		return &storagedeal.Response{
+			State:       storagedeal.Accepted,
 			Message:     "OK",
 			ProposalCid: pcid,
 		}, nil
 	})
 
-	testAPI := newTestClientAPI(require)
-	testRepo := repo.NewInMemoryRepo()
+	testAPI := newTestClientAPI(t)
+	client := NewClient(testNode.GetBlockTime(), th.NewFakeHost(), testAPI)
+	client.ProtocolRequestFunc = testNode.MakeTestProtocolRequest
 
-	client, err := NewClient(testNode, testAPI, testRepo.DealsDs)
-	require.NoError(err)
-
-	dataCid := cidCreator()
+	dataCid := types.SomeCid()
 	minerAddr := addressCreator()
-	ctx := context.Background()
 	askID := uint64(67)
 	duration := uint64(10000)
 	dealResponse, err := client.ProposeDeal(ctx, minerAddr, dataCid, askID, duration, false)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	t.Run("and creates proposal from parameters", func(t *testing.T) {
-		assert.Equal(dataCid, proposal.PieceRef)
-		assert.Equal(duration, proposal.Duration)
-		assert.Equal(minerAddr, proposal.MinerAddress)
-		assert.Equal(testSignature, proposal.Signature)
+		assert.Equal(t, dataCid, proposal.PieceRef)
+		assert.Equal(t, duration, proposal.Duration)
+		assert.Equal(t, minerAddr, proposal.MinerAddress)
+		assert.Equal(t, testSignature, proposal.Signature)
 	})
 
 	t.Run("and creates proposal with file size", func(t *testing.T) {
-		expectedFileSize, err := testNode.GetFileSize(ctx, dataCid)
-		require.NoError(err)
-		assert.Equal(types.NewBytesAmount(expectedFileSize), proposal.Size)
+		expectedFileSize, err := testAPI.DAGGetFileSize(ctx, dataCid)
+		require.NoError(t, err)
+		assert.Equal(t, types.NewBytesAmount(expectedFileSize), proposal.Size)
 	})
 
 	t.Run("and computes the correct total price", func(t *testing.T) {
 		expectedAskPrice := types.NewAttoFILFromFIL(32) // from test plumbing
-		expectedFileSize, err := testNode.GetFileSize(ctx, dataCid)
-		require.NoError(err)
+		expectedFileSize, err := testAPI.DAGGetFileSize(ctx, dataCid)
+		require.NoError(t, err)
 
 		expectedTotalPrice := expectedAskPrice.MulBigInt(big.NewInt(int64(expectedFileSize * duration)))
-		assert.Equal(expectedTotalPrice, proposal.TotalPrice)
+		assert.Equal(t, expectedTotalPrice, proposal.TotalPrice)
 	})
 
 	t.Run("and creates a new payment channel", func(t *testing.T) {
 		// correct payment id and message cid in proposal implies a call to createChannel
-		assert.Equal(testAPI.channelID, proposal.Payment.Channel)
-		assert.Equal(&testAPI.msgCid, proposal.Payment.ChannelMsgCid)
+		assert.Equal(t, testAPI.channelID, proposal.Payment.Channel)
+		assert.Equal(t, &testAPI.msgCid, proposal.Payment.ChannelMsgCid)
 	})
 
 	t.Run("and creates payment info", func(t *testing.T) {
-		assert.Equal(int(duration/VoucherInterval), len(proposal.Payment.Vouchers))
+		assert.Equal(t, int(duration/VoucherInterval), len(proposal.Payment.Vouchers))
 
 		lastValidAt := types.NewBlockHeight(0)
 		for i, voucher := range proposal.Payment.Vouchers {
-			assert.Equal(testAPI.channelID, &voucher.Channel)
-			assert.True(voucher.ValidAt.GreaterThan(lastValidAt))
-			assert.Equal(testAPI.target, voucher.Target)
-			assert.Equal(testAPI.perPayment.MulBigInt(big.NewInt(int64(i+1))), &voucher.Amount)
-			assert.Equal(testAPI.payer, voucher.Payer)
+			assert.Equal(t, testAPI.channelID, &voucher.Channel)
+			assert.True(t, voucher.ValidAt.GreaterThan(lastValidAt))
+			assert.Equal(t, testAPI.target, voucher.Target)
+			assert.Equal(t, testAPI.perPayment.MulBigInt(big.NewInt(int64(i+1))), &voucher.Amount)
+			assert.Equal(t, testAPI.payer, voucher.Payer)
 			lastValidAt = &voucher.ValidAt
 		}
 	})
 
 	t.Run("and sends proposal and stores response", func(t *testing.T) {
-		assert.NotNil(dealResponse)
+		assert.NotNil(t, dealResponse)
 
-		assert.Equal(Accepted, dealResponse.State)
+		assert.Equal(t, storagedeal.Accepted, dealResponse.State)
 
-		res, err := testRepo.DealsDs.Query(query.Query{
-			Prefix: "/" + clientDatastorePrefix,
-		})
-		require.NoError(err)
+		retrievedDeal := testAPI.DealGet(dealResponse.ProposalCid)
 
-		// expect one entry to be the response
-		var response *DealResponse
-		for entry := range res.Next() {
-			var deal clientDeal
-			require.Equal("/client/"+dealResponse.ProposalCid.String(), entry.Key)
-			require.NoError(cbor.DecodeInto(entry.Value, &deal))
-			response = deal.Response
-		}
-
-		assert.NotNil(response)
-		assert.Equal(response, dealResponse)
+		assert.Equal(t, retrievedDeal.Response, dealResponse)
 	})
 }
 
@@ -135,10 +119,11 @@ type clientTestAPI struct {
 	payer       address.Address
 	target      address.Address
 	perPayment  *types.AttoFIL
-	require     *require.Assertions
+	testing     *testing.T
+	deals       map[cid.Cid]*storagedeal.Deal
 }
 
-func newTestClientAPI(require *require.Assertions) *clientTestAPI {
+func newTestClientAPI(t *testing.T) *clientTestAPI {
 	cidGetter := types.NewCidForTestGetter()
 	addressGetter := address.NewForTestGetter()
 
@@ -149,11 +134,12 @@ func newTestClientAPI(require *require.Assertions) *clientTestAPI {
 		payer:       addressGetter(),
 		target:      addressGetter(),
 		perPayment:  types.NewAttoFILFromFIL(10),
-		require:     require,
+		testing:     t,
+		deals:       make(map[cid.Cid]*storagedeal.Deal),
 	}
 }
 
-func (ctp *clientTestAPI) ChainBlockHeight(ctx context.Context) (*types.BlockHeight, error) {
+func (ctp *clientTestAPI) ChainBlockHeight() (*types.BlockHeight, error) {
 	return ctp.blockHeight, nil
 }
 
@@ -163,11 +149,11 @@ func (ctp *clientTestAPI) CreatePayments(ctx context.Context, config porcelain.C
 		Channel:              ctp.channelID,
 		ChannelMsgCid:        ctp.msgCid,
 		GasAttoFIL:           types.NewAttoFILFromFIL(100),
-		Vouchers:             make([]*paymentbroker.PaymentVoucher, 10),
+		Vouchers:             make([]*types.PaymentVoucher, 10),
 	}
 
 	for i := 0; i < 10; i++ {
-		resp.Vouchers[i] = &paymentbroker.PaymentVoucher{
+		resp.Vouchers[i] = &types.PaymentVoucher{
 			Channel: *ctp.channelID,
 			Payer:   ctp.payer,
 			Target:  ctp.target,
@@ -176,6 +162,10 @@ func (ctp *clientTestAPI) CreatePayments(ctx context.Context, config porcelain.C
 		}
 	}
 	return resp, nil
+}
+
+func (ctp *clientTestAPI) DAGGetFileSize(context.Context, cid.Cid) (uint64, error) {
+	return 1016, nil
 }
 
 func (ctp *clientTestAPI) MinerGetAsk(ctx context.Context, minerAddr address.Address, askID uint64) (miner.Ask, error) {
@@ -192,18 +182,22 @@ func (ctp *clientTestAPI) MinerGetOwnerAddress(ctx context.Context, minerAddr ad
 
 func (ctp *clientTestAPI) MinerGetPeerID(ctx context.Context, minerAddr address.Address) (peer.ID, error) {
 	id, err := peer.IDB58Decode("QmWbMozPyW6Ecagtxq7SXBXXLY5BNdP1GwHB2WoZCKMvcb")
-	ctp.require.NoError(err, "Could not create peer id")
+	require.NoError(ctp.testing, err, "Could not create peer id")
 
 	return id, nil
 }
 
-func (ctp *clientTestAPI) GetAndMaybeSetDefaultSenderAddress() (address.Address, error) {
-	// always just default address
-	return ctp.payer, nil
+func (ctp *clientTestAPI) PingMinerWithTimeout(ctx context.Context, p peer.ID, to time.Duration) error {
+	return nil
 }
 
 func (ctp *clientTestAPI) SignBytes(data []byte, addr address.Address) (types.Signature, error) {
 	return testSignature, nil
+}
+
+func (ctp *clientTestAPI) WalletDefaultAddress() (address.Address, error) {
+	// always just default address
+	return ctp.payer, nil
 }
 
 type testClientNode struct {
@@ -220,16 +214,37 @@ func (tcn *testClientNode) GetBlockTime() time.Duration {
 	return 100 * time.Millisecond
 }
 
-func (tcn *testClientNode) GetFileSize(context.Context, cid.Cid) (uint64, error) {
-	return 1000000000, nil
-}
-
-func (tcn *testClientNode) MakeProtocolRequest(ctx context.Context, protocol protocol.ID, peer peer.ID, request interface{}, response interface{}) error {
-	dealResponse := response.(*DealResponse)
+// MakeTestProtocolRequest calls the responder set for the testClientNode to provide a test
+// response for a protocol request.
+// It ignores the host param required for the storage client interface.
+func (tcn *testClientNode) MakeTestProtocolRequest(ctx context.Context, protocol protocol.ID, peer peer.ID, _ host.Host, request interface{}, response interface{}) error {
+	dealResponse := response.(*storagedeal.Response)
 	res, err := tcn.responder(request)
 	if err != nil {
 		return err
 	}
-	*dealResponse = *res.(*DealResponse)
+	*dealResponse = *res.(*storagedeal.Response)
 	return nil
+}
+
+func (ctp *clientTestAPI) DealsLs() ([]*storagedeal.Deal, error) {
+	var results []*storagedeal.Deal
+
+	for _, storageDeal := range ctp.deals {
+		results = append(results, storageDeal)
+	}
+	return results, nil
+}
+
+func (ctp *clientTestAPI) DealGet(dealCid cid.Cid) *storagedeal.Deal {
+	return ctp.deals[dealCid]
+}
+
+func (ctp *clientTestAPI) DealPut(storageDeal *storagedeal.Deal) error {
+	ctp.deals[storageDeal.Response.ProposalCid] = storageDeal
+	return nil
+}
+
+func (ctp *clientTestAPI) MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error) {
+	return [][]byte{{byte(types.TestProofsMode)}}, nil
 }

@@ -13,9 +13,10 @@ import (
 	"os"
 	"sync"
 
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
+	logging "github.com/ipfs/go-log"
 
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/commands"
 	"github.com/filecoin-project/go-filecoin/gengen/util"
 	"github.com/filecoin-project/go-filecoin/types"
 
@@ -27,7 +28,7 @@ import (
 // functional tests!
 type EnvironmentMemoryGenesis struct {
 	genesisCar        []byte
-	genesisMinerOwner *types.KeyInfo
+	genesisMinerOwner commands.WalletSerializeResult
 	genesisMinerAddr  address.Address
 
 	location string
@@ -39,15 +40,18 @@ type EnvironmentMemoryGenesis struct {
 
 	processesMu sync.Mutex
 	processes   []*Filecoin
+
+	proofsMode types.ProofsMode
 }
 
 // NewEnvironmentMemoryGenesis builds an environment with a local genesis that can be used
 // to initialize nodes and create a genesis node. The genesis file is provided by an http
 // server.
-func NewEnvironmentMemoryGenesis(funds *big.Int, location string) (Environment, error) {
+func NewEnvironmentMemoryGenesis(funds *big.Int, location string, proofsMode types.ProofsMode) (Environment, error) {
 	env := &EnvironmentMemoryGenesis{
-		location: location,
-		log:      logging.Logger("environment"),
+		location:   location,
+		log:        logging.Logger("environment"),
+		proofsMode: proofsMode,
 	}
 
 	if err := env.buildGenesis(funds); err != nil {
@@ -198,7 +202,7 @@ func (e *EnvironmentMemoryGenesis) startGenesisServer() error {
 	e.genesisServerAddr = ln.Addr().String()
 
 	go func() {
-		if err := e.genesisServer.Serve(ln); err != nil {
+		if err := e.genesisServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			e.log.Errorf("Genesis file server: %s", err)
 		}
 	}()
@@ -219,6 +223,7 @@ func (e *EnvironmentMemoryGenesis) buildGenesis(funds *big.Int) error {
 				Power: 1,
 			},
 		},
+		ProofsMode: e.proofsMode,
 	}
 
 	var genbuffer bytes.Buffer
@@ -237,7 +242,7 @@ func (e *EnvironmentMemoryGenesis) buildGenesis(funds *big.Int) error {
 	}
 
 	e.genesisCar = genbuffer.Bytes()
-	e.genesisMinerOwner = info.Keys[0]
+	e.genesisMinerOwner = commands.WalletSerializeResult{KeyInfo: info.Keys}
 	e.genesisMinerAddr = info.Miners[0].Address
 
 	return nil

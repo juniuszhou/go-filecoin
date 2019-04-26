@@ -1,4 +1,4 @@
-FROM golang:1.11.2-stretch
+FROM golang:1.12.1-stretch
 MAINTAINER Filecoin Dev Team
 
 RUN apt-get update && apt-get install -y ca-certificates file sudo clang
@@ -9,6 +9,7 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y
 # Thanks Lars :)
 
 ENV SRC_DIR /go/src/github.com/filecoin-project/go-filecoin
+ENV GO111MODULE on
 
 COPY . $SRC_DIR
 

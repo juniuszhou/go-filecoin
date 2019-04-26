@@ -1,88 +1,64 @@
-// Copyright 2014 The go-ethereum Authors
-// This file is part of the go-ethereum library.
-//
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The go-ethereum library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
-
-// THIS WAS TAKEN FROM github.com/ethereum/go-ethereum MODIFY CAREFULLY
-
-package crypto
+package crypto_test
 
 import (
-	"crypto/ecdsa"
+	"math/rand"
 	"testing"
+	"time"
 
-	"gx/ipfs/QmZp3eKdYQHHAneECmeK6HhiMwTPufmjC8DuuaGKv3unvx/blake2b-simd"
+	"github.com/stretchr/testify/assert"
 
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
+	"github.com/filecoin-project/go-filecoin/crypto"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 )
 
-func TestToECDSAErrors(t *testing.T) {
-	assert := assert.New(t)
+func TestGenerateKey(t *testing.T) {
+	tf.UnitTest(t)
 
-	_, err := HexToECDSA("0000000000000000000000000000000000000000000000000000000000000000")
-	assert.Error(err)
+	rand.Seed(time.Now().UnixNano())
 
-	_, err = HexToECDSA("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-	assert.Error(err)
-}
+	sk, err := crypto.GenerateKey()
+	assert.NoError(t, err)
 
-func TestSign(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	assert.Equal(t, len(sk), 32)
 
-	// Generate a key pair and convert the public key to bytes for easy comparison
-	key, err := GenerateKey()
-	assert.NoError(err)
-	ecdasKey, ok := key.Public().(*ecdsa.PublicKey)
-	require.True(ok)
-	// This is the key we will compare recovered keys against
-	expPub := ECDSAPubToBytes(ecdasKey)
+	msg := make([]byte, 32)
+	for i := 0; i < len(msg); i++ {
+		msg[i] = byte(i)
+	}
 
-	// Sign a message using the key we generated previously
-	msg := blake2b.Sum256([]byte("have you considered not asking passive aggressive questions?"))
-	sig, err := Sign(msg[:], key)
-	assert.NoError(err)
+	digest, err := crypto.Sign(sk, msg)
+	assert.NoError(t, err)
+	assert.Equal(t, len(digest), 65)
+	pk := crypto.PublicKey(sk)
 
-	// recover a public key from a message and a signature, it should be
-	// equal to the previously generated public key
-	recPub, err := Ecrecover(msg[:], sig)
-	assert.NoError(err)
-	assert.Equal(expPub, recPub)
+	// valid signature
+	assert.True(t, crypto.Verify(pk, msg, digest))
 
-	// should be equal to SigToPub since Ecrecover calls SigToPub under the hood
-	recoveredPub2, err := SigToPub(msg[:], sig)
-	assert.NoError(err)
-	recPub2 := ECDSAPubToBytes(recoveredPub2)
-	assert.Equal(expPub, recPub2)
+	// invalid signature - different message (too short)
+	assert.False(t, crypto.Verify(pk, msg[3:], digest))
 
-	// Basic sanity check, don't sign the message, pub keys should be different
-	evilMsg := blake2b.Sum256([]byte("being the detective in a crime movie where you are also the murderer..debugging"))
-	recPub, err = Ecrecover(evilMsg[:], sig)
-	assert.NoError(err)
-	assert.NotEqual(expPub, recPub)
+	// invalid signature - different message
+	msg2 := make([]byte, 32)
+	copy(msg2, msg)
+	rand.Shuffle(len(msg2), func(i, j int) { msg2[i], msg2[j] = msg2[j], msg2[i] })
+	assert.False(t, crypto.Verify(pk, msg2, digest))
 
-	recoveredPub2, err = SigToPub(evilMsg[:], sig)
-	assert.NoError(err)
-	recPub2 = ECDSAPubToBytes(recoveredPub2)
-	assert.NotEqual(expPub, recPub2)
-}
+	// invalid signature - different digest
+	digest2 := make([]byte, 65)
+	copy(digest2, digest)
+	rand.Shuffle(len(digest2), func(i, j int) { digest2[i], digest2[j] = digest2[j], digest2[i] })
+	assert.False(t, crypto.Verify(pk, msg, digest2))
 
-func TestInvalidSign(t *testing.T) {
-	assert := assert.New(t)
-	_, err := Sign(make([]byte, 1), nil)
-	assert.Error(err)
-	_, err = Sign(make([]byte, 33), nil)
-	assert.Error(err)
+	// invalid signature - digest too short
+	assert.False(t, crypto.Verify(pk, msg, digest[3:]))
+	assert.False(t, crypto.Verify(pk, msg, digest[:29]))
+
+	// invalid signature - digest too long
+	digest3 := make([]byte, 70)
+	copy(digest3, digest)
+	assert.False(t, crypto.Verify(pk, msg, digest3))
+
+	recovered, err := crypto.EcRecover(msg, digest)
+	assert.NoError(t, err)
+	assert.Equal(t, recovered, crypto.PublicKey(sk))
 }

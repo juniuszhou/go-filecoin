@@ -3,10 +3,9 @@ package node
 import (
 	"context"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	"github.com/pkg/errors"
 
-	"github.com/filecoin-project/go-filecoin/pubsub"
+	"github.com/filecoin-project/go-filecoin/net/pubsub"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -18,13 +17,13 @@ func (node *Node) AddNewBlock(ctx context.Context, b *types.Block) (err error) {
 	// Put block in storage wired to an exchange so this node and other
 	// nodes can fetch it.
 	log.Debugf("putting block in bitswap exchange: %s", b.Cid().String())
-	blkCid, err := node.OnlineStore.Put(ctx, b)
+	blkCid, err := node.cborStore.Put(ctx, b)
 	if err != nil {
 		return errors.Wrap(err, "could not add new block to online storage")
 	}
 
 	log.Debugf("syncing new block: %s", b.Cid().String())
-	if err := node.Syncer.HandleNewBlocks(ctx, []cid.Cid{blkCid}); err != nil {
+	if err := node.Syncer.HandleNewTipset(ctx, types.NewSortedCidSet(blkCid)); err != nil {
 		return err
 	}
 
@@ -47,7 +46,7 @@ func (node *Node) processBlock(ctx context.Context, pubSubMsg pubsub.Message) (e
 	log.Infof("Received new block from network cid: %s", blk.Cid().String())
 	log.Debugf("Received new block from network: %s", blk)
 
-	err = node.Syncer.HandleNewBlocks(ctx, []cid.Cid{blk.Cid()})
+	err = node.Syncer.HandleNewTipset(ctx, types.NewSortedCidSet(blk.Cid()))
 	if err != nil {
 		return errors.Wrap(err, "processing block from network")
 	}

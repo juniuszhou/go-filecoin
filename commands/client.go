@@ -5,15 +5,15 @@ import (
 	"io"
 	"strconv"
 
-	"gx/ipfs/QmQmhotPUzVrMEWNK3x1R5jQ5ZHWyL7tVUrmRPjrBrvyCb/go-ipfs-files"
-	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/go-ipfs-files"
 
-	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/api"
-	"github.com/filecoin-project/go-filecoin/protocol/storage"
+	"github.com/filecoin-project/go-filecoin/porcelain"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/storagedeal"
+	"github.com/filecoin-project/go-filecoin/types"
 )
 
 var clientCmd = &cmds.Command{
@@ -48,7 +48,7 @@ format was provided with the data initially.
 			return err
 		}
 
-		dr, err := GetAPI(env).Client().Cat(req.Context, c)
+		dr, err := GetPorcelainAPI(env).DAGCat(req.Context, c)
 		if err != nil {
 			return err
 		}
@@ -80,7 +80,7 @@ See the go-filecoin client cat command for more details.
 			return fmt.Errorf("given file was not a files.File")
 		}
 
-		out, err := GetAPI(env).Client().ImportData(req.Context, fi)
+		out, err := GetPorcelainAPI(env).DAGImportData(req.Context, fi)
 		if err != nil {
 			return err
 		}
@@ -145,16 +145,16 @@ be 2, 1 hour would be 120, and 1 day would be 2880.
 			return err
 		}
 
-		resp, err := GetAPI(env).Client().ProposeStorageDeal(req.Context, data, miner, askid, duration, allowDuplicates)
+		resp, err := GetStorageAPI(env).ProposeStorageDeal(req.Context, data, miner, askid, duration, allowDuplicates)
 		if err != nil {
 			return err
 		}
 
 		return re.Emit(resp)
 	},
-	Type: storage.DealResponse{},
+	Type: storagedeal.Response{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, resp *storage.DealResponse) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, resp *storagedeal.Response) error {
 			fmt.Fprintf(w, "State:   %s\n", resp.State.String())       // nolint: errcheck
 			fmt.Fprintf(w, "Message: %s\n", resp.Message)              // nolint: errcheck
 			fmt.Fprintf(w, "DealID:  %s\n", resp.ProposalCid.String()) // nolint: errcheck
@@ -181,16 +181,16 @@ format is specified with the --enc flag.
 			return err
 		}
 
-		resp, err := GetAPI(env).Client().QueryStorageDeal(req.Context, propcid)
+		resp, err := GetStorageAPI(env).QueryStorageDeal(req.Context, propcid)
 		if err != nil {
 			return err
 		}
 
 		return re.Emit(resp)
 	},
-	Type: storage.DealResponse{},
+	Type: storagedeal.Response{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, resp *storage.DealResponse) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, resp *storagedeal.Response) error {
 			fmt.Fprintf(w, "Status: %s\n", resp.State.String()) // nolint: errcheck
 			fmt.Fprintf(w, "Message: %s\n", resp.Message)       // nolint: errcheck
 			return nil
@@ -208,14 +208,11 @@ respectively.
 `,
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		asksCh, err := GetAPI(env).Client().ListAsks(req.Context)
-		if err != nil {
-			return err
-		}
+		asksCh := GetPorcelainAPI(env).ClientListAsks(req.Context)
 
 		for a := range asksCh {
 			if a.Error != nil {
-				return err
+				return a.Error
 			}
 			if err := re.Emit(a); err != nil {
 				return err
@@ -223,9 +220,9 @@ respectively.
 		}
 		return nil
 	},
-	Type: api.Ask{},
+	Type: porcelain.Ask{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, ask *api.Ask) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, ask *porcelain.Ask) error {
 			fmt.Fprintf(w, "%s %.3d %s %s\n", ask.Miner, ask.ID, ask.Price, ask.Expiry) // nolint: errcheck
 			return nil
 		}),
@@ -247,16 +244,16 @@ var paymentsCmd = &cmds.Command{
 			return fmt.Errorf("invalid channel id")
 		}
 
-		vouchers, err := GetAPI(env).Client().Payments(req.Context, dealCid)
+		vouchers, err := GetStorageAPI(env).Payments(req.Context, dealCid)
 		if err != nil {
 			return err
 		}
 
 		return re.Emit(vouchers)
 	},
-	Type: []*paymentbroker.PaymentVoucher{},
+	Type: []*types.PaymentVoucher{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, vouchers []*paymentbroker.PaymentVoucher) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, vouchers []*types.PaymentVoucher) error {
 			if _, err := fmt.Println("Channel\tAmount\tValidAt\tEncoded Voucher"); err != nil {
 				return err
 			}

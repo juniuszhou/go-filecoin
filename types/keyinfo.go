@@ -2,25 +2,22 @@ package types
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"fmt"
 
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	cbor "github.com/ipfs/go-ipld-cbor"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/crypto"
-	cu "github.com/filecoin-project/go-filecoin/crypto/util"
 )
 
 func init() {
 	cbor.RegisterCborType(KeyInfo{})
 }
 
-// KeyInfo is a key and its type used for signing
+// KeyInfo is a key and its type used for signing.
 type KeyInfo struct {
-	// Private key as bytes
+	// Private key.
 	PrivateKey []byte `json:"privateKey"`
-	// Curve used to generate private key
+	// Curve used to generate private key.
 	Curve string `json:"curve"`
 }
 
@@ -61,29 +58,11 @@ func (ki *KeyInfo) Equals(other *KeyInfo) bool {
 
 // Address returns the address for this keyinfo
 func (ki *KeyInfo) Address() (address.Address, error) {
-	pub, err := ki.PublicKey()
-	if err != nil {
-		return address.Address{}, err
-	}
-
-	addrHash := address.Hash(pub)
-
 	// TODO: Use the address type we are running on from the config.
-	return address.NewMainnet(addrHash), nil
+	return address.NewSecp256k1Address(ki.PublicKey())
 }
 
 // PublicKey returns the public key part as uncompressed bytes.
-func (ki *KeyInfo) PublicKey() ([]byte, error) {
-	prv, err := crypto.BytesToECDSA(ki.Key())
-	if err != nil {
-		return nil, err
-	}
-
-	pub, ok := prv.Public().(*ecdsa.PublicKey)
-	if !ok {
-		// means a something is wrong with key generation
-		return nil, fmt.Errorf("unknown public key type")
-	}
-
-	return cu.SerializeUncompressed(pub), nil
+func (ki *KeyInfo) PublicKey() []byte {
+	return crypto.PublicKey(ki.PrivateKey)
 }

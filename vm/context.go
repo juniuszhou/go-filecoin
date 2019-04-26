@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
+	"github.com/ipfs/go-cid"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
+	"github.com/filecoin-project/go-filecoin/actor/builtin/account"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/exec"
+	"github.com/filecoin-project/go-filecoin/sampling"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm/errors"
@@ -27,7 +28,6 @@ type Context struct {
 	gasTracker  *GasTracker
 	blockHeight *types.BlockHeight
 	ancestors   []types.TipSet
-	lookBack    int
 
 	deps *deps // Inject external dependencies so we can unit test robustly.
 }
@@ -44,7 +44,6 @@ type NewContextParams struct {
 	GasTracker  *GasTracker
 	BlockHeight *types.BlockHeight
 	Ancestors   []types.TipSet
-	LookBack    int
 }
 
 // NewVMContext returns an initialized context.
@@ -58,7 +57,6 @@ func NewVMContext(params NewContextParams) *Context {
 		gasTracker:  params.GasTracker,
 		blockHeight: params.BlockHeight,
 		ancestors:   params.Ancestors,
-		lookBack:    params.LookBack,
 		deps:        makeDeps(params.State),
 	}
 }
@@ -127,7 +125,7 @@ func (ctx *Context) BlockHeight() *types.BlockHeight {
 
 // IsFromAccountActor returns true if the message is being sent by an account actor.
 func (ctx *Context) IsFromAccountActor() bool {
-	return ctx.from.Code.Defined() && types.AccountActorCodeCid.Equals(ctx.from.Code)
+	return account.IsAccount(ctx.from)
 }
 
 // Send sends a message to another actor.
@@ -194,16 +192,14 @@ func computeActorAddress(creator address.Address, nonce uint64) (address.Address
 	buf := new(bytes.Buffer)
 
 	if _, err := buf.Write(creator.Bytes()); err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
 	if err := binary.Write(buf, binary.BigEndian, nonce); err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
-	hash := address.Hash(buf.Bytes())
-
-	return address.NewMainnet(hash), nil
+	return address.NewActorAddress(buf.Bytes())
 }
 
 // CreateNewActor creates and initializes an actor at the given address.
@@ -218,7 +214,7 @@ func (ctx *Context) CreateNewActor(addr address.Address, code cid.Cid, initializ
 		return errors.FaultErrorWrap(err, "Error retrieving or creating actor")
 	}
 
-	if newActor.Code.Defined() {
+	if !newActor.Empty() {
 		return errors.NewRevertErrorf("attempt to create actor at address %s but a non-empty actor is already installed", addr.String())
 	}
 
@@ -242,45 +238,10 @@ func (ctx *Context) CreateNewActor(addr address.Address, code cid.Cid, initializ
 	return nil
 }
 
-// Rand samples the chain randomness for the tipset at the given height.  The
-// tipset providing randomness for the tipset at sampleHeight is guaranteed to
-// be in ancestors, and Rand will return a fault error if it is not.
-func (ctx *Context) Rand(sampleHeight *types.BlockHeight) ([]byte, error) {
-	sampleIndex := -1
-	var firstHeight uint64
-	for i := 0; i < len(ctx.ancestors); i++ {
-
-		height, err := ctx.ancestors[i].Height()
-		if err != nil {
-			return nil, errors.FaultErrorWrap(err, "Error sampling randomness from chain")
-		}
-		if i == 0 {
-			firstHeight = height
-		}
-		if types.NewBlockHeight(height).Equal(sampleHeight) {
-			sampleIndex = i
-			break
-		}
-	}
-	// Fault if a tipset of this height does not exist in ancestors.
-	if sampleIndex == -1 {
-		return nil, errors.NewFaultError("rand sample height out of range")
-	}
-
-	// Fault if a tipset of sampleHeight - lookBack does not exist in ancestors.
-	// EDGE CASE: for now if ancestors includes the genesis block we take
-	// randomness from the genesis block.
-	// TODO: security, spec, bootstrap implications.
-	// See issue https://github.com/filecoin-project/go-filecoin/issues/1872
-	lookBackIndex := sampleIndex - ctx.lookBack
-	if lookBackIndex < 0 {
-		if firstHeight == uint64(0) {
-			lookBackIndex = 0
-		} else {
-			return nil, errors.NewFaultError("rand lookBack height out of range")
-		}
-	}
-	return ctx.ancestors[lookBackIndex].MinTicket()
+// SampleChainRandomness samples randomness from a block's ancestors at the
+// given height.
+func (ctx *Context) SampleChainRandomness(sampleHeight *types.BlockHeight) ([]byte, error) {
+	return sampling.SampleChainRandomness(sampleHeight, ctx.ancestors)
 }
 
 // Dependency injection setup.

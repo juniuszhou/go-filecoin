@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"math/big"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/libp2p/go-libp2p-peer"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
@@ -57,6 +57,8 @@ type State struct {
 	// TotalCommitedStorage is the number of sectors that are currently committed
 	// in the whole network.
 	TotalCommittedStorage *big.Int
+
+	ProofsMode types.ProofsMode
 }
 
 // NewActor returns a new storage market actor.
@@ -65,9 +67,12 @@ func NewActor() (*actor.Actor, error) {
 }
 
 // InitializeState stores the actor's initial data structure.
-func (sma *Actor) InitializeState(storage exec.Storage, _ interface{}) error {
+func (sma *Actor) InitializeState(storage exec.Storage, proofsModeInterface interface{}) error {
+	proofsMode := proofsModeInterface.(types.ProofsMode)
+
 	initStorage := &State{
 		TotalCommittedStorage: big.NewInt(0),
+		ProofsMode:            proofsMode,
 	}
 	stateBytes, err := cbor.DumpObject(initStorage)
 	if err != nil {
@@ -102,13 +107,17 @@ var storageMarketExports = exec.Exports{
 		Params: []abi.Type{},
 		Return: []abi.Type{abi.Integer},
 	},
+	"getProofsMode": &exec.FunctionSignature{
+		Params: []abi.Type{},
+		Return: []abi.Type{abi.ProofsMode},
+	},
 }
 
 // CreateMiner creates a new miner with the a pledge of the given amount of sectors. The
 // miners collateral is set by the value in the message.
 func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey []byte, pid peer.ID) (address.Address, uint8, error) {
-	if err := vmctx.Charge(100); err != nil {
-		return address.Address{}, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
+		return address.Undef, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
 	var state State
@@ -153,7 +162,7 @@ func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey [
 		return addr, nil
 	})
 	if err != nil {
-		return address.Address{}, errors.CodeError(err), err
+		return address.Undef, errors.CodeError(err), err
 	}
 
 	return ret.(address.Address), 0, nil
@@ -163,7 +172,7 @@ func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey [
 // This occurs either when a miner adds a new commitment, or when one is removed
 // (via slashing or willful removal). The delta is in number of sectors.
 func (sma *Actor) UpdatePower(vmctx exec.VMContext, delta *big.Int) (uint8, error) {
-	if err := vmctx.Charge(100); err != nil {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
 		return exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -198,7 +207,7 @@ func (sma *Actor) UpdatePower(vmctx exec.VMContext, delta *big.Int) (uint8, erro
 
 // GetTotalStorage returns the total amount of proven storage in the system.
 func (sma *Actor) GetTotalStorage(vmctx exec.VMContext) (*big.Int, uint8, error) {
-	if err := vmctx.Charge(100); err != nil {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -216,6 +225,28 @@ func (sma *Actor) GetTotalStorage(vmctx exec.VMContext) (*big.Int, uint8, error)
 	}
 
 	return count, 0, nil
+}
+
+// GetSectorSize returns the sector size of the block chain
+func (sma *Actor) GetProofsMode(vmctx exec.VMContext) (types.ProofsMode, uint8, error) {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
+		return 0, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+	}
+
+	var state State
+	ret, err := actor.WithState(vmctx, &state, func() (interface{}, error) {
+		return state.ProofsMode, nil
+	})
+	if err != nil {
+		return 0, errors.CodeError(err), err
+	}
+
+	size, ok := ret.(types.ProofsMode)
+	if !ok {
+		return 0, 1, fmt.Errorf("expected types.ProofsMode to be returned, but got %T instead", ret)
+	}
+
+	return size, 0, nil
 }
 
 // MinimumCollateral returns the minimum required amount of collateral for a given pledge

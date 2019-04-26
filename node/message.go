@@ -3,7 +3,7 @@ package node
 import (
 	"context"
 
-	"github.com/filecoin-project/go-filecoin/pubsub"
+	"github.com/filecoin-project/go-filecoin/net/pubsub"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -21,6 +21,6 @@ func (node *Node) processMessage(ctx context.Context, pubSubMsg pubsub.Message) 
 
 	log.Debugf("Received new message from network: %s", unmarshaled)
 
-	_, err = node.MsgPool.Add(unmarshaled)
+	_, err = node.MsgPool.Add(ctx, unmarshaled)
 	return err
 }

@@ -6,10 +6,11 @@ import (
 	//	"math/rand"
 	"testing"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	"gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-datastore"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
@@ -19,8 +20,6 @@ import (
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
-
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
 )
 
 // MustGetNonce returns the next nonce for an actor at an address or panics.
@@ -38,11 +37,20 @@ func MustGetNonce(st state.Tree, a address.Address) uint64 {
 	return nonce
 }
 
-// MustAdd adds the given messages to the messagepool or panics if it
-// cannot.
+// MustAdd adds the given messages to the messagepool or panics if it cannot.
 func MustAdd(p *MessagePool, msgs ...*types.SignedMessage) {
+	ctx := context.Background()
 	for _, m := range msgs {
-		if _, err := p.Add(m); err != nil {
+		if _, err := p.Add(ctx, m); err != nil {
+			panic(err)
+		}
+	}
+}
+
+// MustEnqueue adds the given messages to the messagepool or panics if it cannot.
+func MustEnqueue(q *MessageQueue, stamp uint64, msgs ...*types.SignedMessage) {
+	for _, m := range msgs {
+		if err := q.Enqueue(m, stamp); err != nil {
 			panic(err)
 		}
 	}
@@ -69,6 +77,7 @@ func MustConvertParams(params ...interface{}) []byte {
 func NewChainWithMessages(store *hamt.CborIpldStore, root types.TipSet, msgSets ...[][]*types.SignedMessage) []types.TipSet {
 	tipSets := []types.TipSet{}
 	parents := root
+	height := uint64(0)
 
 	// only add root to the chain if it is not the zero-valued-tipset
 	if len(parents) != 0 {
@@ -76,16 +85,17 @@ func NewChainWithMessages(store *hamt.CborIpldStore, root types.TipSet, msgSets 
 			MustPut(store, blk)
 		}
 		tipSets = append(tipSets, parents)
+		height, _ = parents.Height()
+		height++
 	}
 
 	for _, tsMsgs := range msgSets {
-		height, _ := parents.Height()
 		ts := types.TipSet{}
 		// If a message set does not contain a slice of messages then
 		// add a tipset with no messages and a single block to the chain
 		if len(tsMsgs) == 0 {
 			child := &types.Block{
-				Height:  types.Uint64(height + 1),
+				Height:  types.Uint64(height),
 				Parents: parents.ToSortedCidSet(),
 			}
 			MustPut(store, child)
@@ -95,13 +105,14 @@ func NewChainWithMessages(store *hamt.CborIpldStore, root types.TipSet, msgSets 
 			child := &types.Block{
 				Messages: msgs,
 				Parents:  parents.ToSortedCidSet(),
-				Height:   types.Uint64(height + 1),
+				Height:   types.Uint64(height),
 			}
 			MustPut(store, child)
 			ts[child.Cid()] = child
 		}
 		tipSets = append(tipSets, ts)
 		parents = ts
+		height++
 	}
 
 	return tipSets
@@ -131,7 +142,7 @@ func CreateStorages(ctx context.Context, t *testing.T) (state.Tree, vm.StorageMa
 	cst := hamt.NewCborStore()
 	d := datastore.NewMapDatastore()
 	bs := blockstore.NewBlockstore(d)
-	blk, err := consensus.InitGenesis(cst, bs)
+	blk, err := consensus.DefaultGenesis(cst, bs)
 	require.NoError(t, err)
 
 	st, err := state.LoadStateTree(ctx, cst, blk.StateRoot, builtin.Actors)

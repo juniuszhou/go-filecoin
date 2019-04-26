@@ -1,13 +1,15 @@
 package types
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	errPkg "gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	cbor "gx/ipfs/QmcZLyosDwMKdB6NLRsiss9HXzDPhVhhRtPy67JFKTDQDX/go-ipld-cbor"
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	ipld "github.com/ipfs/go-ipld-format"
+	errPkg "github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 )
@@ -36,6 +38,19 @@ type Message struct {
 
 	Method string `json:"method"`
 	Params []byte `json:"params"`
+	// Pay attention to Equals() if updating this struct.
+}
+
+// NewMessage creates a new message.
+func NewMessage(from, to address.Address, nonce uint64, value *AttoFIL, method string, params []byte) *Message {
+	return &Message{
+		From:   from,
+		To:     to,
+		Nonce:  Uint64(nonce),
+		Value:  value,
+		Method: method,
+		Params: params,
+	}
 }
 
 // Unmarshal a message from the given bytes.
@@ -48,10 +63,21 @@ func (msg *Message) Marshal() ([]byte, error) {
 	return cbor.DumpObject(msg)
 }
 
+// ToNode converts the Message to an IPLD node.
+func (msg *Message) ToNode() (ipld.Node, error) {
+	// Use 32 byte / 256 bit digest.
+	obj, err := cbor.WrapObject(msg, DefaultHashFunction, -1)
+	if err != nil {
+		return nil, err
+	}
+
+	return obj, nil
+}
+
 // Cid returns the canonical CID for the message.
 // TODO: can we avoid returning an error?
 func (msg *Message) Cid() (cid.Cid, error) {
-	obj, err := cbor.WrapObject(msg, DefaultHashFunction, -1)
+	obj, err := msg.ToNode()
 	if err != nil {
 		return cid.Undef, errPkg.Wrap(err, "failed to marshal to cbor")
 	}
@@ -72,14 +98,12 @@ func (msg *Message) String() string {
 	return fmt.Sprintf("Message cid=[%v]: %s", cid, string(js))
 }
 
-// NewMessage creates a new message.
-func NewMessage(from, to address.Address, nonce uint64, value *AttoFIL, method string, params []byte) *Message {
-	return &Message{
-		From:   from,
-		To:     to,
-		Nonce:  Uint64(nonce),
-		Value:  value,
-		Method: method,
-		Params: params,
-	}
+// Equals tests whether two messages are equal
+func (msg *Message) Equals(other *Message) bool {
+	return msg.To == other.To &&
+		msg.From == other.From &&
+		msg.Nonce == other.Nonce &&
+		msg.Value.Equal(other.Value) &&
+		msg.Method == other.Method &&
+		bytes.Equal(msg.Params, other.Params)
 }

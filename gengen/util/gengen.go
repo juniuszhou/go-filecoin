@@ -14,22 +14,21 @@ import (
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/crypto"
-	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
 
-	dag "gx/ipfs/QmNRAuGmvnVw8urHkUZQirhu42VTiZjVWASa2aTznEMmpP/go-merkledag"
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	blockstore "gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	offline "gx/ipfs/QmSz8kAe2JCKp2dWSG8gHSWnwSmne8YfRXTeK5HBmc9L7t/go-ipfs-exchange-offline"
-	peer "gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	"gx/ipfs/QmUGpiTCKct5s1F7jaAnY9KJmoo7Qm1R2uhSjq5iHDSUMn/go-car"
-	ds "gx/ipfs/QmUadX5EcvrBmxAV9sE7wUWtWSqxns5K84qKJBixmcT1w9/go-datastore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	bserv "gx/ipfs/QmZsGVGCqMCNzHLNMB6q4F6yyvomqf1VxwhJwSfgo1NGaF/go-blockservice"
-	mh "gx/ipfs/QmerPMzPk1mJVowm8KgmoknWa4yCYvvugMPsgWmDNUvDLW/go-multihash"
+	bserv "github.com/ipfs/go-blockservice"
+	"github.com/ipfs/go-car"
+	"github.com/ipfs/go-cid"
+	ds "github.com/ipfs/go-datastore"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	"github.com/ipfs/go-ipfs-exchange-offline"
+	dag "github.com/ipfs/go-merkledag"
+	"github.com/libp2p/go-libp2p-peer"
+	mh "github.com/multiformats/go-multihash"
+	"github.com/pkg/errors"
 )
 
 // Miner is
@@ -59,6 +58,9 @@ type GenesisCfg struct {
 
 	// Miners is a list of miners that should be set up at the start of the network
 	Miners []Miner
+
+	// ProofsMode affects sealing, sector packing, PoSt, etc. in the proofs library
+	ProofsMode types.ProofsMode
 }
 
 // RenderedGenInfo contains information about a genesis block creation
@@ -100,7 +102,7 @@ func GenGen(ctx context.Context, cfg *GenesisCfg, cst *hamt.CborIpldStore, bs bl
 	st := state.NewEmptyStateTreeWithActors(cst, builtin.Actors)
 	storageMap := vm.NewStorageMap(bs)
 
-	if err := consensus.SetupDefaultActors(ctx, st, storageMap); err != nil {
+	if err := consensus.SetupDefaultActors(ctx, st, storageMap, cfg.ProofsMode); err != nil {
 		return nil, err
 	}
 
@@ -164,7 +166,7 @@ func genKeys(cfgkeys int, pnrg io.Reader) ([]*types.KeyInfo, error) {
 		}
 
 		ki := &types.KeyInfo{
-			PrivateKey: crypto.ECDSAToBytes(sk),
+			PrivateKey: sk,
 			Curve:      types.SECP256K1,
 		}
 
@@ -242,11 +244,9 @@ func setupMiners(st state.Tree, sm vm.StorageMap, keys []*types.KeyInfo, miners 
 		}
 
 		// create miner
-		pubkey, err := keys[m.Owner].PublicKey()
-		if err != nil {
-			return nil, err
-		}
-		ret, err := applyMessageDirect(ctx, st, sm, addr, address.StorageMarketAddress, types.NewAttoFILFromFIL(100000), "createMiner", big.NewInt(10000), pubkey, pid)
+		pubkey := keys[m.Owner].PublicKey()
+
+		ret, err := applyMessageDirect(ctx, st, sm, addr, address.StorageMarketAddress, types.NewAttoFILFromFIL(100000), "createMiner", big.NewInt(10000), pubkey[:], pid)
 		if err != nil {
 			return nil, err
 		}
@@ -272,7 +272,7 @@ func setupMiners(st state.Tree, sm vm.StorageMap, keys []*types.KeyInfo, miners 
 			commD := make([]byte, 32)
 			commR := make([]byte, 32)
 			commRStar := make([]byte, 32)
-			sealProof := make([]byte, proofs.SealBytesLen)
+			sealProof := make([]byte, types.SealBytesLen)
 			if _, err := pnrg.Read(commD[:]); err != nil {
 				return nil, err
 			}
@@ -331,7 +331,7 @@ func applyMessageDirect(ctx context.Context, st state.Tree, vms vm.StorageMap, f
 	// create new processor that doesn't reward and doesn't validate
 	applier := consensus.NewConfiguredProcessor(&messageValidator{}, &blockRewarder{})
 
-	res, err := applier.ApplyMessagesAndPayRewards(ctx, st, vms, []*types.SignedMessage{smsg}, address.Address{}, types.NewBlockHeight(0), nil)
+	res, err := applier.ApplyMessagesAndPayRewards(ctx, st, vms, []*types.SignedMessage{smsg}, address.Undef, types.NewBlockHeight(0), nil)
 	if err != nil {
 		return nil, err
 	}

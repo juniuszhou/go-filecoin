@@ -9,16 +9,15 @@ import (
 	"path/filepath"
 	"syscall"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds"
-	"gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds/cli"
-	cmdhttp "gx/ipfs/QmQtQrtNioesAWtrx8csBvfY37gTe94d6wQ3VikZUjxD39/go-ipfs-cmds/http"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmZcLBXKaFe8ND5YHPkJRAwmhJGrVsi1JqDZNyJ4nRK5Mj/go-multiaddr-net"
-	"gx/ipfs/QmdcULN1WCzgoQmcCaUAmEhwcxHYsDrbZ2LvRJKCL8dMrK/go-homedir"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/go-ipfs-cmds/cli"
+	cmdhttp "github.com/ipfs/go-ipfs-cmds/http"
+	"github.com/mitchellh/go-homedir"
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multiaddr-net"
+	"github.com/pkg/errors"
 
-	"github.com/filecoin-project/go-filecoin/api/impl"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -108,13 +107,16 @@ VIEW DATA STRUCTURES
   go-filecoin show                   - Get human-readable representations of filecoin objects
 
 NETWORK COMMANDS
+  go-filecoin bitswap                - Explore libp2p bitswap
   go-filecoin bootstrap              - Interact with bootstrap addresses
+  go-filecoin dht                    - Interact with the dht
   go-filecoin id                     - Show info about the network peers
   go-filecoin ping <peer ID>...      - Send echo request packets to p2p network members
   go-filecoin swarm                  - Interact with the swarm
+  go-filecoin stats                  - Monitor statistics on your network usage
 
 ACTOR COMMANDS
-  go-filecoin actor                  - Interact with actors. Actors are built-in smart contracts.
+  go-filecoin actor                  - Interact with actors. Actors are built-in smart contracts
   go-filecoin paych                  - Payment channel operations
 
 MESSAGE COMMANDS
@@ -122,7 +124,8 @@ MESSAGE COMMANDS
   go-filecoin mpool                  - Manage the message pool
 
 TOOL COMMANDS
-  go-filecoin log                    - Interact with the daemon event log output.
+  go-filecoin log                    - Interact with the daemon event log output
+  go-filecoin protocol               - Show protocol parameter details
   go-filecoin version                - Show go-filecoin version information
 `,
 	},
@@ -143,31 +146,36 @@ var rootCmdDaemon = &cmds.Command{
 
 // all top level commands, not available to daemon
 var rootSubcmdsLocal = map[string]*cmds.Command{
-	"daemon": daemonCmd,
-	"init":   initCmd,
+	"daemon":  daemonCmd,
+	"init":    initCmd,
+	"version": versionCmd,
 }
 
 // all top level commands, available on daemon. set during init() to avoid configuration loops.
 var rootSubcmdsDaemon = map[string]*cmds.Command{
 	"actor":            actorCmd,
 	"address":          addrsCmd,
+	"bitswap":          bitswapCmd,
 	"bootstrap":        bootstrapCmd,
 	"chain":            chainCmd,
 	"config":           configCmd,
 	"client":           clientCmd,
 	"dag":              dagCmd,
+	"dht":              dhtCmd,
 	"id":               idCmd,
 	"log":              logCmd,
 	"message":          msgCmd,
 	"miner":            minerCmd,
 	"mining":           miningCmd,
 	"mpool":            mpoolCmd,
+	"outbox":           outboxCmd,
 	"paych":            paymentChannelCmd,
 	"ping":             pingCmd,
+	"protocol":         protocolCmd,
 	"retrieval-client": retrievalClientCmd,
 	"show":             showCmd,
+	"stats":            statsCmd,
 	"swarm":            swarmCmd,
-	"version":          versionCmd,
 	"wallet":           walletCmd,
 }
 
@@ -195,7 +203,7 @@ func Run(args []string, stdin, stdout, stderr *os.File) (int, error) {
 }
 
 func buildEnv(ctx context.Context, req *cmds.Request) (cmds.Environment, error) {
-	return &Env{ctx: ctx, api: impl.New(nil)}, nil
+	return &Env{ctx: ctx}, nil
 }
 
 type executor struct {
@@ -261,7 +269,9 @@ func getAPIAddress(req *cmds.Request) (string, error) {
 
 	// we will read the api file if no other option is given.
 	if len(rawAddr) == 0 {
-		rawPath := filepath.Join(filepath.Clean(getRepoDir(req)), repo.APIFile)
+		repoDir, _ := req.Options[OptionRepoDir].(string)
+		repoDir = repo.GetRepoDir(repoDir)
+		rawPath := filepath.Join(filepath.Clean(repoDir), repo.APIFile)
 		apiFilePath, err := homedir.Expand(rawPath)
 		if err != nil {
 			return "", errors.Wrap(err, fmt.Sprintf("can't resolve local repo path %s", rawPath))
@@ -288,14 +298,11 @@ func getAPIAddress(req *cmds.Request) (string, error) {
 }
 
 func requiresDaemon(req *cmds.Request) bool {
-	if req.Command == daemonCmd {
-		return false
+	for _, cmd := range rootSubcmdsLocal {
+		if req.Command == cmd {
+			return false
+		}
 	}
-
-	if req.Command == initCmd {
-		return false
-	}
-
 	return true
 }
 
@@ -317,12 +324,12 @@ func isConnectionRefused(err error) bool {
 	return syscallErr.Err == syscall.ECONNREFUSED
 }
 
-var priceOption = cmdkit.StringOption("price", "Price (FIL e.g. 0.00013) to pay for each GasUnits consumed mining this message")
-var limitOption = cmdkit.Uint64Option("limit", "Maximum number of GasUnits this message is allowed to consume")
+var priceOption = cmdkit.StringOption("gas-price", "Price (FIL e.g. 0.00013) to pay for each GasUnits consumed mining this message")
+var limitOption = cmdkit.Uint64Option("gas-limit", "Maximum number of GasUnits this message is allowed to consume")
 var previewOption = cmdkit.BoolOption("preview", "Preview the Gas cost of this command without actually executing it")
 
 func parseGasOptions(req *cmds.Request) (types.AttoFIL, types.GasUnits, bool, error) {
-	priceOption := req.Options["price"]
+	priceOption := req.Options["gas-price"]
 	if priceOption == nil {
 		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New("price option is required")
 	}
@@ -332,7 +339,7 @@ func parseGasOptions(req *cmds.Request) (types.AttoFIL, types.GasUnits, bool, er
 		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New("invalid gas price (specify FIL as a decimal number)")
 	}
 
-	limitOption := req.Options["limit"]
+	limitOption := req.Options["gas-limit"]
 	if limitOption == nil {
 		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New("limit option is required")
 	}

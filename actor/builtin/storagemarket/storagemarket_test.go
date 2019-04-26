@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
@@ -14,81 +15,83 @@ import (
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/core"
 	th "github.com/filecoin-project/go-filecoin/testhelpers"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/types"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/assert"
-	"gx/ipfs/QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS/testify/require"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStorageMarketCreateMiner(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	st, vms := core.CreateStorages(ctx, t)
 
-	pid := th.RequireRandomPeerID()
+	pid := th.RequireRandomPeerID(t)
 	pdata := actor.MustConvertParams(big.NewInt(10), []byte{}, pid)
 	msg := types.NewMessage(address.TestAddress, address.StorageMarketAddress, 0, types.NewAttoFILFromFIL(100), "createMiner", pdata)
 	result, err := th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
-	require.NoError(err)
-	require.Nil(result.ExecutionError)
+	require.NoError(t, err)
+	require.Nil(t, result.ExecutionError)
 
 	outAddr, err := address.NewFromBytes(result.Receipt.Return[0])
-	require.NoError(err)
+	require.NoError(t, err)
+
 	minerActor, err := st.GetActor(ctx, outAddr)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	storageMkt, err := st.GetActor(ctx, address.StorageMarketAddress)
-	require.NoError(err)
+	require.NoError(t, err)
 
-	assert.Equal(types.NewAttoFILFromFIL(0), storageMkt.Balance)
-	assert.Equal(types.NewAttoFILFromFIL(100), minerActor.Balance)
+	assert.Equal(t, types.NewAttoFILFromFIL(0), storageMkt.Balance)
+	assert.Equal(t, types.NewAttoFILFromFIL(100), minerActor.Balance)
 
 	var mstor miner.State
 	builtin.RequireReadState(t, vms, outAddr, minerActor, &mstor)
 
-	assert.Equal(mstor.Collateral, types.NewAttoFILFromFIL(100))
-	assert.Equal(mstor.PledgeSectors, big.NewInt(10))
-	assert.Equal(mstor.PeerID, pid)
+	assert.Equal(t, mstor.Collateral, types.NewAttoFILFromFIL(100))
+	assert.Equal(t, mstor.PledgeSectors, big.NewInt(10))
+	assert.Equal(t, mstor.PeerID, pid)
 }
 
 func TestStorageMarketCreateMinerPledgeTooLow(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	pledge := big.NewInt(5)
 	st, vms := core.CreateStorages(ctx, t)
-	pdata := actor.MustConvertParams(pledge, []byte{}, th.RequireRandomPeerID())
+	pdata := actor.MustConvertParams(pledge, []byte{}, th.RequireRandomPeerID(t))
 	msg := types.NewMessage(address.TestAddress, address.StorageMarketAddress, 0, MinimumCollateral(pledge), "createMiner", pdata)
 	result, err := th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
 
-	assert.NoError(err)
-	require.NotNil(result.ExecutionError)
-	assert.Contains(result.ExecutionError.Error(), Errors[ErrPledgeTooLow].Error())
+	assert.NoError(t, err)
+	require.NotNil(t, result.ExecutionError)
+	assert.Contains(t, result.ExecutionError.Error(), Errors[ErrPledgeTooLow].Error())
 }
 
 func TestStorageMarketCreateMinerInsufficientCollateral(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	st, vms := core.CreateStorages(ctx, t)
-	pdata := actor.MustConvertParams(big.NewInt(15000), []byte{}, th.RequireRandomPeerID())
+	pdata := actor.MustConvertParams(big.NewInt(15000), []byte{}, th.RequireRandomPeerID(t))
 	msg := types.NewMessage(address.TestAddress, address.StorageMarketAddress, 0, types.NewAttoFILFromFIL(14), "createMiner", pdata)
 	result, err := th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
 
-	assert.NoError(err)
-	require.NotNil(result.ExecutionError)
-	assert.Contains(result.ExecutionError.Error(), Errors[ErrInsufficientCollateral].Error())
+	assert.NoError(t, err)
+	require.NotNil(t, result.ExecutionError)
+	assert.Contains(t, result.ExecutionError.Error(), Errors[ErrInsufficientCollateral].Error())
 }
 
 func TestStorageMarkeCreateMinerDoesNotOverwriteActorBalance(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -96,54 +99,74 @@ func TestStorageMarkeCreateMinerDoesNotOverwriteActorBalance(t *testing.T) {
 
 	// create account of future miner actor by sending FIL to the predicted address
 	minerAddr, err := deriveMinerAddress(address.TestAddress, 0)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	msg := types.NewMessage(address.TestAddress2, minerAddr, 0, types.NewAttoFILFromFIL(100), "", []byte{})
 	result, err := th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
-	require.NoError(err)
-	require.Equal(uint8(0), result.Receipt.ExitCode)
+	require.NoError(t, err)
+	require.Equal(t, uint8(0), result.Receipt.ExitCode)
 
-	pdata := actor.MustConvertParams(big.NewInt(15), []byte{}, th.RequireRandomPeerID())
+	pdata := actor.MustConvertParams(big.NewInt(15), []byte{}, th.RequireRandomPeerID(t))
 	msg = types.NewMessage(address.TestAddress, address.StorageMarketAddress, 0, types.NewAttoFILFromFIL(200), "createMiner", pdata)
 	result, err = th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
-	require.NoError(err)
-	require.Equal(uint8(0), result.Receipt.ExitCode)
-	require.NoError(result.ExecutionError)
+	require.NoError(t, err)
+	require.Equal(t, uint8(0), result.Receipt.ExitCode)
+	require.NoError(t, result.ExecutionError)
 
 	// ensure our derived address is the address storage market creates
 	createdAddress, err := address.NewFromBytes(result.Receipt.Return[0])
-	require.NoError(err)
-	assert.Equal(minerAddr, createdAddress)
-
+	require.NoError(t, err)
+	assert.Equal(t, minerAddr, createdAddress)
 	miner, err := st.GetActor(ctx, minerAddr)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	// miner balance should be sum of messages
-	assert.Equal(types.NewAttoFILFromFIL(300), miner.Balance)
+	assert.Equal(t, types.NewAttoFILFromFIL(300), miner.Balance)
 }
 
 func TestStorageMarkeCreateMinerErrorsOnInvalidKey(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	st, vms := core.CreateStorages(ctx, t)
 
 	publicKey := []byte("012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567")
-	pdata := actor.MustConvertParams(big.NewInt(15), publicKey, th.RequireRandomPeerID())
+	pdata := actor.MustConvertParams(big.NewInt(15), publicKey, th.RequireRandomPeerID(t))
 
 	msg := types.NewMessage(address.TestAddress, address.StorageMarketAddress, 0, types.NewAttoFILFromFIL(200), "createMiner", pdata)
 	result, err := th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
-	require.NoError(err)
-	assert.Contains(result.ExecutionError.Error(), miner.Errors[miner.ErrPublicKeyTooBig].Error())
+	require.NoError(t, err)
+	assert.Contains(t, result.ExecutionError.Error(), miner.Errors[miner.ErrPublicKeyTooBig].Error())
 }
 
 func TestMinimumCollateral(t *testing.T) {
-	assert := assert.New(t)
+	tf.UnitTest(t)
+
 	numSectors := big.NewInt(25000)
 	expected := types.NewAttoFILFromFIL(25)
-	assert.Equal(MinimumCollateral(numSectors), expected)
+	assert.Equal(t, MinimumCollateral(numSectors), expected)
+}
+
+func TestProofsMode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, vms := core.CreateStorages(ctx, t)
+	msg := types.NewMessage(address.TestAddress, address.StorageMarketAddress, 0, types.NewAttoFILFromFIL(14), "getProofsMode", []byte{})
+	result, err := th.ApplyTestMessage(st, vms, msg, types.NewBlockHeight(0))
+
+	require.NoError(t, err)
+	require.NoError(t, result.ExecutionError)
+
+	proofsModeInterface, err := abi.Deserialize(result.Receipt.Return[0], abi.ProofsMode)
+	require.NoError(t, err)
+
+	proofsMode, ok := proofsModeInterface.Val.(types.ProofsMode)
+	require.True(t, ok)
+
+	assert.Equal(t, types.TestProofsMode, proofsMode)
 }
 
 // this is used to simulate an attack where someone derives the likely address of another miner's
@@ -154,14 +177,12 @@ func deriveMinerAddress(creator address.Address, nonce uint64) (address.Address,
 	buf := new(bytes.Buffer)
 
 	if _, err := buf.Write(creator.Bytes()); err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
 	if err := binary.Write(buf, binary.BigEndian, nonce); err != nil {
-		return address.Address{}, err
+		return address.Undef, err
 	}
 
-	hash := address.Hash(buf.Bytes())
-
-	return address.NewMainnet(hash), nil
+	return address.NewActorAddress(buf.Bytes())
 }

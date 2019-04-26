@@ -3,17 +3,29 @@ package fast
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
+	logging "github.com/ipfs/go-log"
 	iptb "github.com/ipfs/iptb/testbed"
 	"github.com/ipfs/iptb/testbed/interfaces"
-	"gx/ipfs/QmTu65MVbemtUxJEWgsTtzv9Zv9P8rvmqNA4eG9TrTRGYc/go-libp2p-peer"
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
+	"github.com/libp2p/go-libp2p-peer"
 
+	fcconfig "github.com/filecoin-project/go-filecoin/config"
 	"github.com/filecoin-project/go-filecoin/tools/fast/fastutil"
 	dockerplugin "github.com/filecoin-project/go-filecoin/tools/iptb-plugins/filecoin/docker"
 	localplugin "github.com/filecoin-project/go-filecoin/tools/iptb-plugins/filecoin/local"
+)
+
+var (
+	// ErrDoubleInitOpts is returned by InitDaemon when both init options are provided by EnvironmentOpts
+	// in NewProcess as well as passed to InitDaemon directly.
+	ErrDoubleInitOpts = errors.New("cannot provide both init options through environment and arguments")
+
+	// ErrDoubleDaemonOpts is returned by StartDaemon when both init options are provided by EnvironmentOpts
+	// in NewProcess as well as passed to StartDaemon directly.
+	ErrDoubleDaemonOpts = errors.New("cannot provide both daemon options through environment and arguments")
 )
 
 // must register all filecoin iptb plugins first.
@@ -44,6 +56,7 @@ func init() {
 // IPTBCoreExt is an extended interface of the iptb.Core. It defines additional requirement.
 type IPTBCoreExt interface {
 	testbedi.Core
+	testbedi.Config
 
 	// StderrReader is require to gather daemon logs during action execution
 	StderrReader() (io.ReadCloser, error)
@@ -85,11 +98,31 @@ func NewFilecoinProcess(ctx context.Context, c IPTBCoreExt, eo EnvironmentOpts) 
 
 // InitDaemon initializes the filecoin daemon process.
 func (f *Filecoin) InitDaemon(ctx context.Context, args ...string) (testbedi.Output, error) {
+	if len(args) != 0 && len(f.initOpts) != 0 {
+		return nil, ErrDoubleInitOpts
+	}
+
+	if len(args) == 0 {
+		for _, opt := range f.initOpts {
+			args = append(args, opt()...)
+		}
+	}
+
 	return f.core.Init(ctx, args...)
 }
 
 // StartDaemon starts the filecoin daemon process.
 func (f *Filecoin) StartDaemon(ctx context.Context, wait bool, args ...string) (testbedi.Output, error) {
+	if len(args) != 0 && len(f.daemonOpts) != 0 {
+		return nil, ErrDoubleDaemonOpts
+	}
+
+	if len(args) == 0 {
+		for _, opt := range f.daemonOpts {
+			args = append(args, opt()...)
+		}
+	}
+
 	out, err := f.core.Start(ctx, wait, args...)
 	if err != nil {
 		return nil, err
@@ -117,6 +150,16 @@ func (f *Filecoin) StopDaemon(ctx context.Context) error {
 	}
 
 	return f.teardownStderrCapturing()
+}
+
+// Shell starts a user shell targeting the filecoin process
+func (f *Filecoin) Shell() error {
+	return f.core.Shell(f.ctx, []testbedi.Core{})
+}
+
+// Dir returns the dirtectory used by the filecoin process
+func (f *Filecoin) Dir() string {
+	return f.core.Dir()
 }
 
 // DumpLastOutput writes all the output (args, exit-code, error, stderr, stdout) of the last ran
@@ -189,4 +232,23 @@ func (f *Filecoin) RunCmdLDJSONWithStdin(ctx context.Context, stdin io.Reader, a
 	}
 
 	return json.NewDecoder(out.Stdout()), nil
+}
+
+// Config return the config file of the FAST process.
+func (f *Filecoin) Config() (*fcconfig.Config, error) {
+	fcc, err := f.core.Config()
+	if err != nil {
+		return nil, err
+	}
+	cfg, ok := fcc.(*fcconfig.Config)
+	if !ok {
+		return nil, fmt.Errorf("failed to cast filecoin config struct")
+	}
+
+	return cfg, nil
+}
+
+// WriteConfig writes the config `cgf` to the FAST process's repo.
+func (f *Filecoin) WriteConfig(cfg *fcconfig.Config) error {
+	return f.core.WriteConfig(cfg)
 }

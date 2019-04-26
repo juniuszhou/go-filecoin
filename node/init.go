@@ -3,12 +3,12 @@ package node
 import (
 	"context"
 
-	"gx/ipfs/QmNf3wujpV2Y7Lnj2hy2UrmuX8bhMDStRHbnSLh7Ypf36h/go-hamt-ipld"
-	bstore "gx/ipfs/QmRu7tiRnFk9mMPpVECQTBQJqXtmG132jJxA1w9A7TtpBz/go-ipfs-blockstore"
-	offline "gx/ipfs/QmSz8kAe2JCKp2dWSG8gHSWnwSmne8YfRXTeK5HBmc9L7t/go-ipfs-exchange-offline"
-	ci "gx/ipfs/QmTW4SdgBWq9GjsBsHeUx8WuGxzhgzAf88UMH2w62PC8yK/go-libp2p-crypto"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	bserv "gx/ipfs/QmZsGVGCqMCNzHLNMB6q4F6yyvomqf1VxwhJwSfgo1NGaF/go-blockservice"
+	bserv "github.com/ipfs/go-blockservice"
+	"github.com/ipfs/go-hamt-ipld"
+	bstore "github.com/ipfs/go-ipfs-blockstore"
+	offline "github.com/ipfs/go-ipfs-exchange-offline"
+	ci "github.com/libp2p/go-libp2p-crypto"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/chain"
@@ -58,8 +58,6 @@ func Init(ctx context.Context, r repo.Repo, gen consensus.GenesisInitFunc, opts 
 		o(cfg)
 	}
 
-	// TODO(ipfs): make the blockstore and blockservice have the same interfaces
-	// so that this becomes less painful
 	bs := bstore.NewBlockstore(r.Datastore())
 	cst := &hamt.CborIpldStore{Blocks: bserv.New(bs, offline.Exchange(bs))}
 
@@ -85,9 +83,9 @@ func Init(ctx context.Context, r repo.Repo, gen consensus.GenesisInitFunc, opts 
 
 	newConfig.Mining.AutoSealIntervalSeconds = cfg.AutoSealIntervalSeconds
 
-	if cfg.DefaultWalletAddress != (address.Address{}) {
+	if cfg.DefaultWalletAddress != (address.Undef) {
 		newConfig.Wallet.DefaultAddress = cfg.DefaultWalletAddress
-	} else if r.Config().Wallet.DefaultAddress == (address.Address{}) {
+	} else if r.Config().Wallet.DefaultAddress == (address.Undef) {
 		// TODO: but behind a config option if this should be generated
 		addr, err := newAddress(r)
 		if err != nil {
@@ -125,12 +123,12 @@ func makePrivateKey(nbits int) (ci.PrivKey, error) {
 func newAddress(r repo.Repo) (address.Address, error) {
 	backend, err := wallet.NewDSBackend(r.WalletDatastore())
 	if err != nil {
-		return address.Address{}, errors.Wrap(err, "failed to set up wallet backend")
+		return address.Undef, errors.Wrap(err, "failed to set up wallet backend")
 	}
 
 	addr, err := backend.NewAddress()
 	if err != nil {
-		return address.Address{}, errors.Wrap(err, "failed to create address")
+		return address.Undef, errors.Wrap(err, "failed to create address")
 	}
 
 	return addr, err

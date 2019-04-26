@@ -1,3 +1,5 @@
+// +build !windows
+
 package sectorbuilder
 
 import (
@@ -8,15 +10,14 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/proofs"
+	bserv "github.com/ipfs/go-blockservice"
+	"github.com/ipfs/go-cid"
+	logging "github.com/ipfs/go-log"
+	"github.com/pkg/errors"
 
-	dag "gx/ipfs/QmNRAuGmvnVw8urHkUZQirhu42VTiZjVWASa2aTznEMmpP/go-merkledag"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	uio "gx/ipfs/QmRDWTzVdbHXdtat7tVJ7YC7kRaW7rTZTEF79yykcLYa49/go-unixfs/io"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	bserv "gx/ipfs/QmZsGVGCqMCNzHLNMB6q4F6yyvomqf1VxwhJwSfgo1NGaF/go-blockservice"
-	logging "gx/ipfs/QmbkT7eMTyXfpeyB3ZMxxcxg7XH8t6uXp49jqzz4HB7BGF/go-log"
+	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/proofs/sectorbuilder/bytesink"
+	"github.com/filecoin-project/go-filecoin/types"
 )
 
 // #cgo LDFLAGS: -L${SRCDIR}/../lib -lfilecoin_proofs
@@ -29,6 +30,10 @@ var log = logging.Logger("sectorbuilder") // nolint: deadcode
 // MaxNumStagedSectors configures the maximum number of staged sectors which can
 // be open and accepting data at any time.
 const MaxNumStagedSectors = 1
+
+// MaxTimeToWriteBytesToSink configures the maximum amount of time it should
+// take to copy user piece bytes from the provided Reader to the ByteSink.
+const MaxTimeToWriteBytesToSink = time.Second * 30
 
 // stagedSectorMetadata is a sector into which we write user piece-data before
 // sealing. Note: sectorID is unique across all staged and sealed sectors for a
@@ -44,7 +49,7 @@ func elapsed(what string) func() {
 	}
 }
 
-// RustSectorBuilder is a struct which serves as a proxy for a SectorStore in Rust.
+// RustSectorBuilder is a struct which serves as a proxy for a SectorBuilder in Rust.
 type RustSectorBuilder struct {
 	blockService bserv.BlockService
 	ptr          unsafe.Pointer
@@ -56,6 +61,10 @@ type RustSectorBuilder struct {
 	// sealStatusPoller polls for sealing status for the sectors whose ids it
 	// knows about.
 	sealStatusPoller *sealStatusPoller
+
+	// SectorClass configures behavior of libfilecoin_proofs, including sector
+	// packing, sector sizes, sealing and PoSt generation performance.
+	SectorClass types.SectorClass
 }
 
 var _ SectorBuilder = &RustSectorBuilder{}
@@ -68,8 +77,8 @@ type RustSectorBuilderConfig struct {
 	MetadataDir      string
 	MinerAddr        address.Address
 	SealedSectorDir  string
-	SectorStoreType  proofs.SectorStoreType
 	StagedSectorDir  string
+	SectorClass      types.SectorClass
 }
 
 // NewRustSectorBuilder instantiates a SectorBuilder through the FFI.
@@ -90,13 +99,13 @@ func NewRustSectorBuilder(cfg RustSectorBuilderConfig) (*RustSectorBuilder, erro
 	cSealedSectorDir := C.CString(cfg.SealedSectorDir)
 	defer C.free(unsafe.Pointer(cSealedSectorDir))
 
-	scfg, err := proofs.CSectorStoreType(cfg.SectorStoreType)
+	class, err := cSectorClass(cfg.SectorClass)
 	if err != nil {
-		return nil, errors.Errorf("unknown sector store type: %v", cfg.SectorStoreType)
+		return nil, errors.Wrap(err, "failed to get sector class")
 	}
 
 	resPtr := (*C.InitSectorBuilderResponse)(unsafe.Pointer(C.init_sector_builder(
-		(*C.ConfiguredStore)(unsafe.Pointer(scfg)),
+		class,
 		C.uint64_t(cfg.LastUsedSectorID),
 		cMetadataDir,
 		(*[31]C.uint8_t)(proverIDCBytes),
@@ -114,6 +123,7 @@ func NewRustSectorBuilder(cfg RustSectorBuilderConfig) (*RustSectorBuilder, erro
 		blockService:      cfg.BlockService,
 		ptr:               unsafe.Pointer(resPtr.sector_builder),
 		sectorSealResults: make(chan SectorSealResult),
+		SectorClass:       cfg.SectorClass,
 	}
 
 	// load staged sector metadata and use it to initialize the poller
@@ -136,66 +146,109 @@ func NewRustSectorBuilder(cfg RustSectorBuilderConfig) (*RustSectorBuilder, erro
 	return sb, nil
 }
 
-// GetMaxUserBytesPerStagedSector produces the number of user piece-bytes which
-// will fit into a newly-provisioned staged sector.
-func (sb *RustSectorBuilder) GetMaxUserBytesPerStagedSector() (numBytes uint64, err error) {
-	defer elapsed("GetMaxUserBytesPerStagedSector")()
-
-	resPtr := (*C.GetMaxStagedBytesPerSector)(unsafe.Pointer(C.get_max_user_bytes_per_staged_sector((*C.SectorBuilder)(sb.ptr))))
-	defer C.destroy_get_max_user_bytes_per_staged_sector_response(resPtr)
-
-	if resPtr.status_code != 0 {
-		return 0, errors.New(C.GoString(resPtr.error_msg))
-	}
-
-	return uint64(resPtr.max_staged_bytes_per_sector), nil
-}
-
 // AddPiece writes the given piece into an unsealed sector and returns the id
 // of that sector.
-func (sb *RustSectorBuilder) AddPiece(ctx context.Context, pi *PieceInfo) (sectorID uint64, err error) {
+func (sb *RustSectorBuilder) AddPiece(ctx context.Context, pieceRef cid.Cid, pieceSize uint64, pieceReader io.Reader) (sectorID uint64, retErr error) {
 	defer elapsed("AddPiece")()
 
-	pieceKey := pi.Ref.String()
-	dagService := dag.NewDAGService(sb.blockService)
+	ctx, cancel := context.WithTimeout(ctx, MaxTimeToWriteBytesToSink)
+	defer cancel()
 
-	rootIpldNode, err := dagService.Get(ctx, pi.Ref)
+	sink, err := bytesink.NewFifo()
 	if err != nil {
 		return 0, err
 	}
 
-	r, err := uio.NewDagReader(ctx, rootIpldNode, dagService)
-	if err != nil {
-		return 0, err
+	// errCh holds any error encountered when streaming bytes or making the CGO
+	// call. The channel is buffered so that the goroutines can exit, which will
+	// close the pipe, which unblocks the CGO call.
+	errCh := make(chan error, 2)
+	defer close(errCh)
+
+	// sectorIDCh receives a value if the CGO call indicates that the client
+	// piece has successfully been added to a sector. The channel is buffered
+	// so that the goroutine can exit if a value is sent to errCh before the
+	// CGO call completes.
+	sectorIDCh := make(chan uint64, 1)
+	defer close(sectorIDCh)
+
+	// goroutine attempts to copy bytes from piece's reader to the sink
+	go func() {
+		// opening the sink blocks the goroutine until a reader is opened on the
+		// other end of the FIFO pipe
+		err := sink.Open()
+		if err != nil {
+			errCh <- errors.Wrap(err, "failed to open sink")
+			return
+		}
+
+		// closing the sink signals to the reader that we're done writing, which
+		// unblocks the reader
+		defer func() {
+			err := sink.Close()
+			if err != nil {
+				log.Warningf("failed to close sink: %s", err)
+			}
+		}()
+
+		n, err := io.Copy(sink, pieceReader)
+		if err != nil {
+			errCh <- errors.Wrap(err, "failed to copy to pipe")
+			return
+		}
+
+		if uint64(n) != pieceSize {
+			errCh <- errors.Errorf("expected to write %d bytes but wrote %d", pieceSize, n)
+			return
+		}
+	}()
+
+	// goroutine makes CGO call, which blocks until FIFO pipe opened for writing
+	// from within other goroutine
+	go func() {
+		cPieceKey := C.CString(pieceRef.String())
+		defer C.free(unsafe.Pointer(cPieceKey))
+
+		cSinkPath := C.CString(sink.ID())
+		defer C.free(unsafe.Pointer(cSinkPath))
+
+		resPtr := (*C.AddPieceResponse)(unsafe.Pointer(C.add_piece(
+			(*C.SectorBuilder)(sb.ptr),
+			cPieceKey,
+			C.uint64_t(pieceSize),
+			cSinkPath,
+		)))
+		defer C.destroy_add_piece_response(resPtr)
+
+		if resPtr.status_code != 0 {
+			msg := "CGO add_piece returned an error (error_msg=%s, sinkPath=%s)"
+			log.Errorf(msg, C.GoString(resPtr.error_msg), sink.ID())
+			errCh <- errors.New(C.GoString(resPtr.error_msg))
+			return
+		}
+
+		sectorIDCh <- uint64(resPtr.sector_id)
+	}()
+
+	select {
+	case <-ctx.Done():
+		errStr := "context completed before CGO call could return"
+		strFmt := "%s (sinkPath=%s)"
+		log.Errorf(strFmt, errStr, sink.ID())
+
+		return 0, errors.New(errStr)
+	case err := <-errCh:
+		errStr := "error streaming piece-bytes"
+		strFmt := "%s (sinkPath=%s)"
+		log.Errorf(strFmt, errStr, sink.ID())
+
+		return 0, errors.Wrap(err, errStr)
+	case sectorID := <-sectorIDCh:
+		go sb.sealStatusPoller.addSectorID(sectorID)
+		log.Infof("add piece complete (pieceRef=%s, sectorID=%d, sinkPath=%s)", pieceRef.String(), sectorID, sink.ID())
+
+		return sectorID, nil
 	}
-
-	pieceBytes := make([]byte, pi.Size)
-	_, err = r.Read(pieceBytes)
-	if err != nil {
-		return 0, errors.Wrapf(err, "error reading piece bytes into buffer")
-	}
-
-	cPieceKey := C.CString(pieceKey)
-	defer C.free(unsafe.Pointer(cPieceKey))
-
-	cPieceBytes := C.CBytes(pieceBytes)
-	defer C.free(cPieceBytes)
-
-	resPtr := (*C.AddPieceResponse)(unsafe.Pointer(C.add_piece(
-		(*C.SectorBuilder)(sb.ptr),
-		cPieceKey,
-		(*C.uint8_t)(cPieceBytes),
-		C.size_t(len(pieceBytes)),
-	)))
-	defer C.destroy_add_piece_response(resPtr)
-
-	if resPtr.status_code != 0 {
-		return 0, errors.New(C.GoString(resPtr.error_msg))
-	}
-
-	go sb.sealStatusPoller.addSectorID(uint64(resPtr.sector_id))
-
-	return uint64(resPtr.sector_id), nil
 }
 
 func (sb *RustSectorBuilder) findSealedSectorMetadata(sectorID uint64) (*SealedSectorMetadata, error) {
@@ -214,19 +267,19 @@ func (sb *RustSectorBuilder) findSealedSectorMetadata(sectorID uint64) (*SealedS
 		return nil, nil
 	} else if resPtr.seal_status_code == C.Sealed {
 		commRSlice := C.GoBytes(unsafe.Pointer(&resPtr.comm_r[0]), 32)
-		var commR proofs.CommR
+		var commR types.CommR
 		copy(commR[:], commRSlice)
 
 		commDSlice := C.GoBytes(unsafe.Pointer(&resPtr.comm_d[0]), 32)
-		var commD proofs.CommD
+		var commD types.CommD
 		copy(commD[:], commDSlice)
 
 		commRStarSlice := C.GoBytes(unsafe.Pointer(&resPtr.comm_r_star[0]), 32)
-		var commRStar proofs.CommRStar
+		var commRStar types.CommRStar
 		copy(commRStar[:], commRStarSlice)
 
 		proofSlice := C.GoBytes(unsafe.Pointer(&resPtr.snark_proof[0]), 384)
-		var proof proofs.SealProof
+		var proof types.SealProof
 		copy(proof[:], proofSlice)
 
 		ps, err := goPieceInfos((*C.FFIPieceMetadata)(unsafe.Pointer(resPtr.pieces_ptr)), resPtr.pieces_len)
@@ -305,13 +358,14 @@ func (sb *RustSectorBuilder) Close() error {
 	return nil
 }
 
-// GeneratePoST produces a proof-of-spacetime for the provided commitment replicas.
-func (sb *RustSectorBuilder) GeneratePoST(req GeneratePoSTRequest) (GeneratePoSTResponse, error) {
-	defer elapsed("GeneratePoST")()
+// GeneratePoSt produces a proof-of-spacetime for the provided commitment replicas.
+func (sb *RustSectorBuilder) GeneratePoSt(req GeneratePoStRequest) (GeneratePoStResponse, error) {
+	defer elapsed("GeneratePoSt")()
 
 	// flattening the byte slice makes it easier to copy into the C heap
-	flattened := make([]byte, 32*len(req.CommRs))
-	for idx, commR := range req.CommRs {
+	commRs := req.SortedCommRs.Values()
+	flattened := make([]byte, 32*len(commRs))
+	for idx, commR := range commRs {
 		copy(flattened[(32*idx):(32*(1+idx))], commR[:])
 	}
 
@@ -321,23 +375,54 @@ func (sb *RustSectorBuilder) GeneratePoST(req GeneratePoSTRequest) (GeneratePoST
 
 	challengeSeedPtr := unsafe.Pointer(&(req.ChallengeSeed)[0])
 
-	// a mutable pointer to a GeneratePoSTResponse C-struct
-	resPtr := (*C.GeneratePoSTResponse)(unsafe.Pointer(C.generate_post((*C.SectorBuilder)(sb.ptr), (*C.uint8_t)(cflattened), C.size_t(len(flattened)), (*[32]C.uint8_t)(challengeSeedPtr))))
+	// a mutable pointer to a GeneratePoStResponse C-struct
+	resPtr := (*C.GeneratePoStResponse)(unsafe.Pointer(C.generate_post((*C.SectorBuilder)(sb.ptr), (*C.uint8_t)(cflattened), C.size_t(len(flattened)), (*[32]C.uint8_t)(challengeSeedPtr))))
 	defer C.destroy_generate_post_response(resPtr)
 
 	if resPtr.status_code != 0 {
-		return GeneratePoSTResponse{}, errors.New(C.GoString(resPtr.error_msg))
+		return GeneratePoStResponse{}, errors.New(C.GoString(resPtr.error_msg))
 	}
 
-	// copy proof bytes back to Go from C
-	proofSlice := C.GoBytes(unsafe.Pointer(&resPtr.proof[0]), C.int(proofs.SnarkBytesLen))
-	var proof proofs.PoStProof
-	copy(proof[:], proofSlice)
+	proofs, err := goPoStProofs(resPtr.flattened_proofs_ptr, resPtr.flattened_proofs_len)
+	if err != nil {
+		return GeneratePoStResponse{}, err
+	}
 
-	return GeneratePoSTResponse{
-		Proof:  proof,
+	return GeneratePoStResponse{
+		Proofs: proofs,
 		Faults: goUint64s(resPtr.faults_ptr, resPtr.faults_len),
 	}, nil
+}
+
+// goPoStProofs accepts a pointer to a C-allocated byte array and a size and
+// produces a Go-managed slice of PoStProof. Note that this function copies
+// values into the Go heap from C.
+func goPoStProofs(src *C.uint8_t, size C.size_t) ([]types.PoStProof, error) {
+	chunkSize := int(types.PoStBytesLen)
+	arrSize := int(size)
+
+	if src == nil {
+		return []types.PoStProof{}, nil
+	}
+
+	if arrSize%chunkSize != 0 {
+		msg := "PoSt proof array invalid size (arrSize=%d % PoStBytesLen=%d != 0)"
+		return nil, errors.Errorf(msg, arrSize, types.PoStBytesLen)
+	}
+
+	out := make([]types.PoStProof, arrSize/chunkSize)
+
+	// Create a slice from a pointer to an array on the C heap by slicing to
+	// the appropriate size. We can then copy from this slice into the Go heap.
+	//
+	// https://github.com/golang/go/wiki/cgo#turning-c-arrays-into-go-slices
+	tmp := (*(*[1 << 30]byte)(unsafe.Pointer(src)))[:size:size]
+
+	for i := 0; i < len(out); i++ {
+		copy(out[i][:], tmp[i*chunkSize:(i+1)*chunkSize])
+	}
+
+	return out, nil
 }
 
 // goUint64s accepts a pointer to a C-allocated uint64 and a size and produces
@@ -394,4 +479,64 @@ func goPieceInfos(src *C.FFIPieceMetadata, size C.size_t) ([]*PieceInfo, error) 
 	}
 
 	return ps, nil
+}
+
+func cFFISealProofPartitions(spp types.PoRepProofPartitions) (C.FFISealProofPartitions, error) {
+	switch spp {
+	case types.TestPoRepProofPartitions:
+		return C.FFISealProofPartitions(0), nil
+	case types.TwoPoRepPartitions:
+		return C.FFISealProofPartitions(C.SPP_Two), nil
+	default:
+		return C.FFISealProofPartitions(0), errors.Errorf("unhandled value: %v", spp)
+	}
+}
+
+func cFFIPoStProofPartitions(ppp types.PoStProofPartitions) (C.FFIPoStProofPartitions, error) {
+	switch ppp {
+	case types.TestPoStPartitions:
+		return C.FFIPoStProofPartitions(0), nil
+	case types.OnePoStPartition:
+		return C.FFIPoStProofPartitions(C.PPP_One), nil
+	default:
+		return C.FFIPoStProofPartitions(0), errors.Errorf("unhandled value: %v", ppp)
+	}
+}
+
+func cSectorClass(c types.SectorClass) (C.FFISectorClass, error) {
+	size, err := cFFISectorSizeFrom(c.SectorSize())
+	if err != nil {
+		return C.FFISectorClass{}, nil
+	}
+
+	seal, err := cFFISealProofPartitions(c.PoRepProofPartitions())
+	if err != nil {
+		return C.FFISectorClass{}, nil
+	}
+
+	post, err := cFFIPoStProofPartitions(c.PoStProofPartitions())
+	if err != nil {
+		return C.FFISectorClass{}, nil
+	}
+
+	return C.FFISectorClass{
+		sector_size:           size,
+		seal_proof_partitions: seal,
+		post_proof_partitions: post,
+	}, nil
+}
+
+// cFFISectorSizeFrom produces an FFI-compatible FFISectorSize from a
+// SectorSize. This function's return type includes a C type, so it cannot be
+// exported. See: https://golang.org/cmd/cgo/#hdr-Go_references_to_C for more
+// information.
+func cFFISectorSizeFrom(ss types.SectorSize) (C.FFISectorSize, error) {
+	switch ss {
+	case types.OneKiBSectorSize:
+		return C.FFISectorSize(C.SSB_OneKiB), nil
+	case types.TwoHundredFiftySixMiBSectorSize:
+		return C.FFISectorSize(C.SSB_TwoHundredFiftySixMiB), nil
+	default:
+		return C.FFISectorSize(0), errors.Errorf("unhandled value: %v", ss)
+	}
 }
